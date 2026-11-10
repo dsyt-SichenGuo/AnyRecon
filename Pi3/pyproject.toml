@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pi3"
+version = "0.1"
+description = "pi3"
+readme = {text = "Pi3 geometry model bundled with AnyRecon. See https://github.com/yyfz/Pi3 for upstream usage and attribution. The AnyRecon pipeline uses the bundled source directly.", content-type = "text/plain"}
+requires-python = ">=3.10.0"
+dependencies = [
+    "safetensors",
+]
+
+# Setuptools configuration
+[tool.setuptools]
+# Disable automatic package discovery to avoid conflicts
+packages = ["pi3"]
+
+# Include package data
+[tool.setuptools.package-data]
+"pi3" = ["**/*"]

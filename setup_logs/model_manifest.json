@@ -1,0 +1,134 @@
+[
+  {
+    "repo": "Wan-AI/Wan2.1-I2V-14B-720P",
+    "revision": "8823af45fcc58a8aa999a54b04be9abc7d2aac98",
+    "file": "Wan2.1_VAE.pth",
+    "path": "checkpoints/Wan2.1_VAE.pth",
+    "size": 507609880,
+    "sha256": "38071ab59bd94681c686fa51d75a1968f64e470262043be31f7a094e442fd981"
+  },
+  {
+    "repo": "Wan-AI/Wan2.1-I2V-14B-720P",
+    "revision": "8823af45fcc58a8aa999a54b04be9abc7d2aac98",
+    "file": "diffusion_pytorch_model-00001-of-00007.safetensors",
+    "path": "checkpoints/diffusion_pytorch_model-00001-of-00007.safetensors",
+    "size": 9847223624,
+    "sha256": "3c36c371b3060931770f693f22253a7de7c76fc79cffb0ab08032fb5a04784e4"
+  },
+  {
+    "repo": "Wan-AI/Wan2.1-I2V-14B-720P",
+    "revision": "8823af45fcc58a8aa999a54b04be9abc7d2aac98",
+    "file": "diffusion_pytorch_model-00002-of-00007.safetensors",
+    "path": "checkpoints/diffusion_pytorch_model-00002-of-00007.safetensors",
+    "size": 9797021016,
+    "sha256": "eb465c3d3ec91bf5562f8f9c1a7cbb010266012f255d05d0d5c8815524a1dd43"
+  },
+  {
+    "repo": "Wan-AI/Wan2.1-I2V-14B-720P",
+    "revision": "8823af45fcc58a8aa999a54b04be9abc7d2aac98",
+    "file": "diffusion_pytorch_model-00003-of-00007.safetensors",
+    "path": "checkpoints/diffusion_pytorch_model-00003-of-00007.safetensors",
+    "size": 9797041744,
+    "sha256": "072ebcc282f2d35c016c22fbc46e1c8eefa85745b9038ca4eea9e34cf4a47186"
+  },
+  {
+    "repo": "Wan-AI/Wan2.1-I2V-14B-720P",
+    "revision": "8823af45fcc58a8aa999a54b04be9abc7d2aac98",
+    "file": "diffusion_pytorch_model-00004-of-00007.safetensors",
+    "path": "checkpoints/diffusion_pytorch_model-00004-of-00007.safetensors",
+    "size": 9692142864,
+    "sha256": "3b3e8561340ad1d43e4569912810fdc24f83ddbcf4f2863c968114479113324b"
+  },
+  {
+    "repo": "Wan-AI/Wan2.1-I2V-14B-720P",
+    "revision": "8823af45fcc58a8aa999a54b04be9abc7d2aac98",
+    "file": "diffusion_pytorch_model-00005-of-00007.safetensors",
+    "path": "checkpoints/diffusion_pytorch_model-00005-of-00007.safetensors",
+    "size": 9692142864,
+    "sha256": "9700f2ba6194aad23a458adc6e73352ea982a0b1c7606f459cd3e559eacc270d"
+  },
+  {
+    "repo": "Wan-AI/Wan2.1-I2V-14B-720P",
+    "revision": "8823af45fcc58a8aa999a54b04be9abc7d2aac98",
+    "file": "diffusion_pytorch_model-00006-of-00007.safetensors",
+    "path": "checkpoints/diffusion_pytorch_model-00006-of-00007.safetensors",
+    "size": 9692142864,
+    "sha256": "148e81b477494ef9590acd8983f45116d4684919659ea2c0e747050458aa2346"
+  },
+  {
+    "repo": "Wan-AI/Wan2.1-I2V-14B-720P",
+    "revision": "8823af45fcc58a8aa999a54b04be9abc7d2aac98",
+    "file": "diffusion_pytorch_model-00007-of-00007.safetensors",
+    "path": "checkpoints/diffusion_pytorch_model-00007-of-00007.safetensors",
+    "size": 7061933536,
+    "sha256": "19f7ff97683bdbe3ee9ddada6f85d3e5d91a9b871a3beffdb5f19a1cc6208647"
+  },
+  {
+    "repo": "Wan-AI/Wan2.1-I2V-14B-720P",
+    "revision": "8823af45fcc58a8aa999a54b04be9abc7d2aac98",
+    "file": "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
+    "path": "checkpoints/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
+    "size": 4772359047,
+    "sha256": "628c9998b613391f193eb67ff68da9667d75f492911e4eb3decf23460a158c38"
+  },
+  {
+    "repo": "Wan-AI/Wan2.1-I2V-14B-720P",
+    "revision": "8823af45fcc58a8aa999a54b04be9abc7d2aac98",
+    "file": "models_t5_umt5-xxl-enc-bf16.pth",
+    "path": "checkpoints/models_t5_umt5-xxl-enc-bf16.pth",
+    "size": 11361920418,
+    "sha256": "7cace0da2b446bbbbc57d031ab6cf163a3d59b366da94e5afe36745b746fd81d"
+  },
+  {
+    "repo": "Yutian10/AnyRecon",
+    "revision": "218e0508692c167ef854323eb5ed0b6c613eb347",
+    "file": "AnyRecon_full_attention.ckpt",
+    "path": "AnyRecon_full_attention.ckpt",
+    "size": 613682970,
+    "sha256": "32ec474537ede26dab5919c99a2079a63bf93fd6bcb30cbcff5a4907f9252ddf"
+  },
+  {
+    "repo": "yyfz233/Pi3",
+    "revision": "ae722e7039287d0c8fde9f11f197f804f44b510c",
+    "file": "model.safetensors",
+    "path": "Pi3/model.safetensors",
+    "size": 3834909248,
+    "sha256": "33580e4702ac671558aedeab1148fd08118f7ce45bdbeb99f3e3cf340062875d"
+  },
+  {
+    "repo": "Wan-AI/Wan2.1-I2V-14B-720P",
+    "revision": "8823af45fcc58a8aa999a54b04be9abc7d2aac98",
+    "file": "google/umt5-xxl/special_tokens_map.json",
+    "path": "checkpoints/google/umt5-xxl/special_tokens_map.json",
+    "size": 6623,
+    "sha256": null,
+    "blob_id": "14855e7052ffbb595057dfd791d293c1c940db2c"
+  },
+  {
+    "repo": "Wan-AI/Wan2.1-I2V-14B-720P",
+    "revision": "8823af45fcc58a8aa999a54b04be9abc7d2aac98",
+    "file": "google/umt5-xxl/spiece.model",
+    "path": "checkpoints/google/umt5-xxl/spiece.model",
+    "size": 4548313,
+    "sha256": "e3909a67b780650b35cf529ac782ad2b6b26e6d1f849d3fbb6a872905f452458",
+    "blob_id": "2fe5f347e9f9367585589ae89e997dfbd5cf802c"
+  },
+  {
+    "repo": "Wan-AI/Wan2.1-I2V-14B-720P",
+    "revision": "8823af45fcc58a8aa999a54b04be9abc7d2aac98",
+    "file": "google/umt5-xxl/tokenizer.json",
+    "path": "checkpoints/google/umt5-xxl/tokenizer.json",
+    "size": 16837417,
+    "sha256": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b",
+    "blob_id": "7bd4ee3cf5633e49c0e06a3aac2a621559e6222a"
+  },
+  {
+    "repo": "Wan-AI/Wan2.1-I2V-14B-720P",
+    "revision": "8823af45fcc58a8aa999a54b04be9abc7d2aac98",
+    "file": "google/umt5-xxl/tokenizer_config.json",
+    "path": "checkpoints/google/umt5-xxl/tokenizer_config.json",
+    "size": 61728,
+    "sha256": null,
+    "blob_id": "4e1cc1cd85599ce0b47fd0a746af188fe4043ff2"
+  }
+]

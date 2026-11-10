@@ -1,0 +1,98 @@
+# Local documentation and presentation assets (keep license files).
+*.[mM][dD]
+!/README.md
+/docs/
+/Pi3/assets/
+
+# Server access material and local agent/editor configuration.
+/server/
+/.aws/
+/.agents/
+/.codex/
+/.vscode/
+/.idea/
+.env
+.env.*
+*.pem
+*.key
+*.secret
+*credentials*
+
+# Model weights and downloaded checkpoints.
+/checkpoints/
+/models/
+*.ckpt
+*.safetensors
+*.pt
+*.pth
+*.onnx
+*.gguf
+# Do not ignore *.model: bundled SentencePiece tokenizers require these files.
+
+# Input datasets, generated results and reconstruction caches.
+/data/
+/datasets/
+/videos/
+/outputs/
+/results/
+/renders/
+/reconstruction/
+/selected_target_cameras/
+/example/
+/examples/
+/Pi3/examples/
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.ply
+*.pcd
+*.npz
+*.npy
+
+# Historical setup files; retain the manifest used by download/check scripts.
+/setup_logs/*
+!/setup_logs/model_manifest.json
+
+# Python environments, caches and build products.
+.venv/
+venv/
+env/
+envs/
+__pycache__/
+*.py[cod]
+*.so
+*.o
+*.a
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.ipynb_checkpoints/
+.coverage
+.coverage.*
+htmlcov/
+
+# Logs, partial downloads, archives and local temporary files.
+*.log
+*.part
+*.aria2
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+.DS_Store
+Thumbs.db
+
+# Keep source/configuration assets required by the pipeline:
+# pipeline/, scripts/ (including target_camera_viewer.html), diffsynth/, Pi3/,
+# tests/, requirements*.txt, pyproject.toml, tokenizer JSON/TXT/*.model files.

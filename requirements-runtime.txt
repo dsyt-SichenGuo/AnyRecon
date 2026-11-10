@@ -1,0 +1,27 @@
+# Main-project Torch pins take precedence over Pi3's conflicting Torch pins.
+# Use the repository's bundled diffsynth source, rather than a newer PyPI copy.
+torch==2.4.1
+torchvision==0.19.1
+torchaudio==2.4.1
+numpy==1.26.4
+Pillow
+opencv-python==4.11.0.86
+einops
+tqdm
+numba==0.63.1
+scipy
+plyfile
+huggingface_hub<1
+safetensors
+transformers==4.49.0
+timm
+sentencepiece
+ftfy
+imageio
+imageio-ffmpeg
+modelscope
+peft==0.14.0
+accelerate
+pandas
+omegaconf
+plotly>=5.24,<7

@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pi3 自由相机 · 目标位姿</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#10161d;color:#e1ebf1;font:14px system-ui}main{display:flex;height:100vh}#stage{flex:1;min-width:0;display:flex;align-items:center;justify-content:center;background:#05080c;position:relative}canvas{display:block;touch-action:none;outline:none}aside{width:340px;overflow:auto;padding:20px;background:#19232e}h1{font-size:20px;margin:0 0 14px}h2{font-size:15px;margin:20px 0 8px}p{line-height:1.7;color:#b0c4d3}label{display:block;margin:7px 0}input,select,button{background:#253747;color:#f0f5fa;border:1px solid #476074;border-radius:5px;padding:7px;max-width:100%}button{cursor:pointer;margin:4px 2px 4px 0}button:hover{background:#37556c}button:disabled{opacity:.5;cursor:wait}input[type=number]{width:100%}.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.primary{background:#176a85;width:100%;font-weight:600}#status{white-space:pre-wrap;overflow-wrap:anywhere;color:#79dcd4}#pose{white-space:pre-wrap;font:12px monospace;color:#aac4da}#hud{position:absolute;top:12px;left:14px;pointer-events:none;background:#10161dbb;padding:8px;color:#a7c7da}#targets button{display:block;width:100%;text-align:left}small{color:#a3b5c3}kbd{background:#314658;padding:1px 4px;border-radius:3px}a{color:#7de0fa}
+</style>
+<main><div id="stage"><canvas id="view" tabindex="0"></canvas><div id="hud">加载点云…</div></div><aside>
+<h1>自由相机 / 保存目标视角</h1>
+<p>拖动鼠标改变朝向，中键拖动平移。点击画面后使用 <kbd>W A S D</kbd> 前后左右，<kbd>Q / E</kbd> 下降 / 上升，<kbd>Z / X</kbd> 滚转，<kbd>Shift</kbd> 加速。滚轮前后移动。移动方向跟随相机，无碰撞限制。</p>
+<button id="lock">锁定鼠标自由观察</button><small>Esc 解除锁定</small>
+<label>移动速度（重建单位/秒）<input id="speed" type="number" step="0.01" min="0.000001"></label>
+<label>点大小 <input id="pointsize" type="range" min="1" max="8" step="0.5" value="2"></label>
+<label><input id="showcams" type="checkbox" checked> 显示参考相机和已保存目标的视锥</label>
+<h2>从参考相机开始</h2><select id="reference" style="width:100%"></select><button id="jump">跳转到参考相机</button>
+<h2>输出尺寸 / 针孔内参</h2><small>宽高须为 16 的倍数。画面黑边之外的区域对应保存的完整输出画幅；浏览器预览不是最终点云 splat 渲染。</small>
+<div class="grid"><label>宽<input id="width" type="number" value="1280" step="16"></label><label>高<input id="height" type="number" value="960" step="16"></label></div>
+<button id="resize">应用尺寸并按比例缩放 K</button>
+<div class="grid"><label>fx<input id="fx" type="number" step="0.1"></label><label>fy<input id="fy" type="number" step="0.1"></label><label>cx<input id="cx" type="number" step="0.1"></label><label>cy<input id="cy" type="number" step="0.1"></label></div>
+<button id="applyK">应用内参</button><button id="resetK">使用参考相机内参</button>
+<label>预览近裁剪面<input id="near" type="number" step="0.001" min="0.000001" value="0.1"></label>
+<small>原项目点云渲染保留相机 Z &gt; 0.1 的点。此项只控制预览裁剪，不改相机位姿或 K。</small>
+<h2>保存到服务器磁盘</h2><button id="save" class="primary">保存当前视角（T）</button>
+<p id="status">加载中…</p><div id="pose"></div><h2>已保存目标（点击返回该视角）</h2><div id="targets"></div>
+<p><a href="/api/targets" target="_blank">查看全部目标 JSON</a><br>保存顺序就是目标帧顺序。世界坐标和尺度保持 Pi3 原值，OpenCV 相机轴：右 X、下 Y、前 Z。仅保存手动选择的离散视角，不自动插值或平滑。</p>
+</aside></main>
+<script>
+'use strict';
+const $=id=>document.getElementById(id), canvas=$('view'), stage=$('stage'), keys=new Set();
+const token='__SAVE_TOKEN__';
+let cfg, camera, K, W=1280,H=960, cloudBuffer, npoints=0, lineBuffer, lineCount=0, targets=[], last=0, saving=false;
+let gl, program, loc;
+const dot=(a,b)=>a.reduce((s,x,i)=>s+x*b[i],0), cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+const norm=a=>{const s=Math.hypot(...a);return a.map(x=>x/s);};
+const column=i=>[camera[0][i],camera[1][i],camera[2][i]], center=()=>column(3);
+function setColumn(i,v){for(let j=0;j<3;j++)camera[j][i]=v[j];}
+function rotate(axis,angle){axis=norm(axis);const c=Math.cos(angle),s=Math.sin(angle);
+ for(let i=0;i<3;i++){let v=column(i),t=cross(axis,v),d=dot(axis,v);setColumn(i,v.map((x,j)=>x*c+t[j]*s+axis[j]*d*(1-c)));}
+ const r=norm(column(0)),d0=column(1),d=norm(d0.map((x,j)=>x-r[j]*dot(r,d0)));setColumn(0,r);setColumn(1,d);setColumn(2,cross(r,d));
+}
+function move(x,y,z){let c=center(),r=column(0),d=column(1),f=column(2);setColumn(3,c.map((v,i)=>v+x*r[i]+y*d[i]+z*f[i]));}
+function notify(text,error=false){$('status').textContent=text;$('status').style.color=error?'#ffac96':'#79dcd4';}
+function updateFields(){for(const [id,v] of [['fx',K[0][0]],['fy',K[1][1]],['cx',K[0][2]],['cy',K[1][2]]])$(id).value=v.toFixed(6);}
+function referenceK(){const ref=cfg.intrinsics[+$('reference').value];K=ref.map((row,i)=>row.map(v=>v*(i===0?W/cfg.image_size[0]:i===1?H/cfg.image_size[1]:1)));updateFields();}
+function jumpReference(){camera=structuredClone(cfg.poses[+$('reference').value]);referenceK();}
+function resizeCanvas(){if(!cfg)return;let w=stage.clientWidth,h=stage.clientHeight;if(w/h>W/H)w=h*W/H;else h=w*H/W;canvas.style.width=w+'px';canvas.style.height=h+'px';const ratio=Math.min(devicePixelRatio||1,2);canvas.width=Math.max(1,Math.round(w*ratio));canvas.height=Math.max(1,Math.round(h*ratio));$('hud').textContent=`显示 ${cfg.shown_points.toLocaleString()} / ${cfg.total_points.toLocaleString()} 点 · ${W} × ${H}`;}
+function shader(type,source){const s=gl.createShader(type);gl.shaderSource(s,source);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw Error(gl.getShaderInfoLog(s));return s;}
+function initGL(){gl=canvas.getContext('webgl',{antialias:true});if(!gl)throw Error('浏览器不支持 WebGL，请开启硬件加速。');
+ program=gl.createProgram();gl.attachShader(program,shader(gl.VERTEX_SHADER,`
+ attribute vec3 position; attribute vec3 color; varying vec3 rgb;
+ uniform mat3 rotation; uniform vec3 eye; uniform vec4 calibration; uniform vec2 size;
+ uniform float nearPlane; uniform float farPlane; uniform float pointSize;
+ void main(){vec3 p=rotation*(position-eye);float u=calibration.x*p.x+calibration.z*p.z;float v=calibration.y*p.y+calibration.w*p.z;
+ gl_Position=vec4(2.0*u/size.x-p.z,p.z-2.0*v/size.y,(farPlane+nearPlane)/(farPlane-nearPlane)*p.z-2.0*farPlane*nearPlane/(farPlane-nearPlane),p.z);
+ gl_PointSize=pointSize;rgb=color;}`));
+ gl.attachShader(program,shader(gl.FRAGMENT_SHADER,`precision mediump float;varying vec3 rgb;uniform bool roundPoints;
+ void main(){if(roundPoints&&length(gl_PointCoord-vec2(0.5))>0.5)discard;gl_FragColor=vec4(rgb,1.0);}`));
+ gl.linkProgram(program);if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(program));gl.useProgram(program);
+ loc={};for(const name of ['rotation','eye','calibration','size','nearPlane','farPlane','pointSize','roundPoints'])loc[name]=gl.getUniformLocation(program,name);
+ loc.position=gl.getAttribLocation(program,'position');loc.color=gl.getAttribLocation(program,'color');gl.enable(gl.DEPTH_TEST);gl.clearColor(.025,.035,.05,1);
+}
+function makeBuffer(data){const b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.bufferData(gl.ARRAY_BUFFER,data,gl.STATIC_DRAW);return b;}
+function bindBuffer(b){gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.enableVertexAttribArray(loc.position);gl.vertexAttribPointer(loc.position,3,gl.FLOAT,false,24,0);gl.enableVertexAttribArray(loc.color);gl.vertexAttribPointer(loc.color,3,gl.FLOAT,false,24,12);}
+function updateLines(){const values=[];function addFrustum(pose,k,size,color){const depth=cfg.span*.012,verts=[[0,0,0]];for(const [u,v] of [[0,0],[size[0],0],[size[0],size[1]],[0,size[1]]])verts.push([(u-k[0][2])/k[0][0]*depth,(v-k[1][2])/k[1][1]*depth,depth]);
+ const world=verts.map(v=>[0,1,2].map(j=>pose[j][3]+dot(pose[j].slice(0,3),v)));
+ for(const [a,b] of [[0,1],[0,2],[0,3],[0,4],[1,2],[2,3],[3,4],[4,1]])for(const i of [a,b])values.push(...world[i],...color);}
+ cfg.poses.forEach((p,i)=>addFrustum(p,cfg.intrinsics[i],cfg.image_size,[1,.65,.2]));targets.forEach(t=>addFrustum(t.c2w,t.K,t.image_size,[.1,1,.7]));
+ if(lineBuffer)gl.deleteBuffer(lineBuffer);lineBuffer=makeBuffer(new Float32Array(values));lineCount=values.length/6;
+}
+function draw(time){let dt=Math.min((time-last)/1000||0,.05);last=time;
+ if(camera){const speed=Math.max(0,+$('speed').value||0)*dt*(keys.has('Shift')?5:1),pressed=k=>keys.has(k)?1:0;
+ move((pressed('d')-pressed('a'))*speed,(pressed('q')-pressed('e'))*speed,(pressed('w')-pressed('s'))*speed);
+ const roll=(pressed('x')-pressed('z'))*dt;if(roll)rotate(column(2),roll);
+ gl.viewport(0,0,canvas.width,canvas.height);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+ // c2w columns are world-space right/down/forward; R^T maps world to CV camera.
+ gl.uniformMatrix3fv(loc.rotation,false,new Float32Array([camera[0][0],camera[0][1],camera[0][2],camera[1][0],camera[1][1],camera[1][2],camera[2][0],camera[2][1],camera[2][2]]));
+ gl.uniform3fv(loc.eye,center());gl.uniform4f(loc.calibration,K[0][0],K[1][1],K[0][2],K[1][2]);gl.uniform2f(loc.size,W,H);
+ const near=Math.max(1e-6,+$('near').value||.1);gl.uniform1f(loc.nearPlane,near);gl.uniform1f(loc.farPlane,Math.max(cfg.span*100,near*100));gl.uniform1f(loc.pointSize,+$('pointsize').value);
+ bindBuffer(cloudBuffer);gl.uniform1i(loc.roundPoints,1);gl.drawArrays(gl.POINTS,0,npoints);
+ if($('showcams').checked){bindBuffer(lineBuffer);gl.uniform1i(loc.roundPoints,0);gl.drawArrays(gl.LINES,0,lineCount);}
+ const c=center(),f=column(2);$('pose').textContent='位置: '+c.map(x=>x.toFixed(5)).join(', ')+'\n朝向: '+f.map(x=>x.toFixed(5)).join(', ');
+ }requestAnimationFrame(draw);
+}
+async function refreshTargets(){const response=await fetch('/api/targets');if(!response.ok)throw Error('读取已保存相机失败');targets=(await response.json()).cameras;$('targets').replaceChildren();targets.forEach((target,i)=>{const button=document.createElement('button');button.textContent=`目标 ${i} · ${target.image_size.join(' × ')}`;button.onclick=()=>{camera=structuredClone(target.c2w);K=structuredClone(target.K);[W,H]=target.image_size;$('width').value=W;$('height').value=H;updateFields();resizeCanvas();};$('targets').append(button);});updateLines();}
+async function save(){if(saving||!camera)return;saving=true;$('save').disabled=true;try{const response=await fetch('/api/targets',{method:'POST',headers:{'Content-Type':'application/json','X-Save-Token':token},body:JSON.stringify({c2w:camera,K,image_size:[W,H]})});const result=await response.json();if(!response.ok)throw Error(result.error);await refreshTargets();notify(`已保存目标 ${result.frame_id}\n${result.output_dir}\ntarget_cameras.json / target_cameras.npz`);}catch(error){notify(error.message,true);}finally{saving=false;$('save').disabled=false;}}
+function setupEvents(){canvas.addEventListener('contextmenu',e=>e.preventDefault());canvas.addEventListener('pointerdown',e=>{canvas.focus();canvas.setPointerCapture(e.pointerId);});
+ document.addEventListener('mousemove',e=>{if(!camera)return;const locked=document.pointerLockElement===canvas;if(!locked&&e.target!==canvas)return;
+ if(locked||(e.buttons&1)||(e.buttons&2)){rotate(column(1),e.movementX*.003);rotate(column(0),-e.movementY*.003);}else if(e.buttons&4){const scale=(+$('speed').value||0)*.003;move(-e.movementX*scale,-e.movementY*scale,0);}});
+ canvas.addEventListener('wheel',e=>{e.preventDefault();move(0,0,-Math.sign(e.deltaY)*(+$('speed').value||0)*.2);},{passive:false});
+ document.addEventListener('keydown',e=>{if(['INPUT','SELECT','TEXTAREA','BUTTON'].includes(e.target.tagName)||!camera)return;const k=e.key==='Shift'?'Shift':e.key.toLowerCase();if(['w','a','s','d','q','e','z','x','Shift','t'].includes(k))e.preventDefault();keys.add(k);if(k==='t'&&!e.repeat)save();});
+ document.addEventListener('keyup',e=>keys.delete(e.key==='Shift'?'Shift':e.key.toLowerCase()));window.addEventListener('blur',()=>keys.clear());document.addEventListener('focusin',e=>{if(['INPUT','SELECT','TEXTAREA'].includes(e.target.tagName))keys.clear();});document.addEventListener('visibilitychange',()=>keys.clear());
+ $('lock').onclick=()=>{canvas.focus();if(canvas.requestPointerLock)canvas.requestPointerLock();else notify('此浏览器不支持鼠标锁定，可拖动画面观察。',true);};
+ $('jump').onclick=jumpReference;$('resetK').onclick=referenceK;$('save').onclick=save;
+ $('resize').onclick=()=>{const w=+$('width').value,h=+$('height').value;if(![w,h].every(n=>Number.isInteger(n)&&n>=16&&n<=16384&&n%16===0))return notify('宽高须为 16..16384 内的 16 的倍数。',true);K=K.map((row,i)=>row.map(v=>v*(i===0?w/W:i===1?h/H:1)));W=w;H=h;updateFields();resizeCanvas();notify('已应用输出尺寸，fx/cx 按宽缩放，fy/cy 按高缩放。');};
+ $('applyK').onclick=()=>{const [fx,fy,cx,cy]=['fx','fy','cx','cy'].map(id=>+$(id).value);if(![fx,fy,cx,cy].every(Number.isFinite)||fx<=0||fy<=0)return notify('焦距必须为正，内参必须为有限数值。',true);K=[[fx,0,cx],[0,fy,cy],[0,0,1]];notify('内参已应用，保存时将使用当前 K。');};window.addEventListener('resize',resizeCanvas);
+}
+(async()=>{try{cfg=await(await fetch('/api/config')).json();initGL();cfg.sources.forEach((source,i)=>{const option=document.createElement('option');option.value=i;option.textContent=`参考 ${i} · ${source.split('/').pop()}`;$('reference').append(option);});$('speed').value=(cfg.span*.08).toPrecision(4);jumpReference();
+ const response=await fetch('/api/points');if(!response.ok)throw Error('点云读取失败');const data=new Float32Array(await response.arrayBuffer());cloudBuffer=makeBuffer(data);npoints=data.length/6;await refreshTargets();resizeCanvas();setupEvents();$('hud').textContent=`显示 ${cfg.shown_points.toLocaleString()} / ${cfg.total_points.toLocaleString()} 点 · ${W} × ${H}`;notify('准备就绪。移动到所需视角后按 T 保存。');requestAnimationFrame(draw);}catch(error){notify(error.message,true);$('hud').textContent='初始化失败，见右侧错误';}})();
+</script></html>
