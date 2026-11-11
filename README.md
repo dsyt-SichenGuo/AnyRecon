@@ -106,7 +106,7 @@ python scripts/select_target_cameras.py \
   --port 8766
 ```
 
-浏览器打开 `http://127.0.0.1:8766`。保存第一帧前将尺寸设为 896×512，并应用按比例缩放的 K；按最终顺序保存目标相机，完成后 Ctrl+C 停止查看器。相机使用 Pi3 世界坐标系和 OpenCV 轴约定，保存的视角不会自动插值。远程节点没有浏览器访问方式时，可下载同一份 scene 缓存到本地选相机，再上传目标相机 JSON/NPZ；节点上的原始参考图路径需保持有效。
+浏览器打开 `http://127.0.0.1:8766`。保存第一帧前将尺寸设为 896×512，并应用按比例缩放的 K；在网页设置每个 Chunk 的目标帧数 N（2–1000，默认 30），按 R（或 T）开始录制，自由移动后再次按 R 结束；整段沿相机位置轨迹按累计距离等间隔重采样成 N 个目标相机，包含首尾，位置线性插值、旋转球面插值，不做额外平滑。可连续记录多个 Chunk，每段可设置不同 N。按 U 或 Ctrl+Z 撤销当前录制并返回起点；未在录制时则删除上一个完整 Chunk 并返回其录制前视角。完成后 Ctrl+C 停止查看器。相机使用 Pi3 世界坐标系和 OpenCV 轴约定。远程节点没有浏览器访问方式时，可下载同一份 scene 缓存到本地选相机，再上传目标相机 JSON/NPZ；节点上的原始参考图路径需保持有效。
 
 ```bash
 python scripts/prepare_selected_targets.py \
@@ -123,7 +123,109 @@ python run_AnyRecon.py \
   --independent_chunks --export_target_frames
 ```
 
+轨迹文件中的 `chunks` 记录分段边界；打包时自动沿用录制边界，`--chunk_size` 仅用于没有 chunk 信息的旧相机文件。所有 Chunk 使用相同输出尺寸，N 越大单组生成显存需求越高。JSON 保存每段帧数、路径长度、采样距离及目标 ID，NPZ 额外保存 `chunk_offsets/chunk_ids`。撤销会同步更新两份文件。
+
 检查条件 RGB/mask 和参考拼图后再生成。最终图片位于 `generated/target_frames/`，相机对应关系位于 `generated/target_mapping.json`。重新推理使用新的输出目录；准备阶段可按同参数恢复。相邻组需要携带历史输出时，准备与推理两阶段都使用 `--context_chunks`，推理省略 `--independent_chunks`。
+
+## 5. 可配置参考候选池与两种检索方法
+
+`scripts/prepare_selected_targets.py` 一次完成：读取 `scene.npz` 中的完整点云、来源 ID 和参考相机 → 按目标相机渲染 RGB/mask → 导出选中参考 RGB/白色 mask → 按录制的 chunk 边界打包视频、info、manifest 和逐帧相机。无需重跑 Pi3 或加载扩散权重。
+
+| 参数 | 含义 |
+| --- | --- |
+| `--num_reference 10` | 每段参考图数量；improved 精确选 10 张，original 遵循原代码将 10 作为上限，可能更少 |
+| `--reference_method improved` | 改进检索：采样点云粗 z-buffer 近似遮挡、按来源覆盖和新增像素收益选择，首帧为选中参考中贡献最强者 |
+| `--reference_method original` | 原项目代码检索：完整点云投影贡献计数，每目标默认取前 10 个来源后汇总排序；保留原代码包含遮挡点的计数方式，参考按原 ID 排序 |
+| `--reference_method compare` | 同时生成 original/improved 两套可独立推理的输入；目标 RGB/mask 共用，仅渲染一次 |
+| `--reference_ids 0 10 20 30` | 指定候选参考 ID，从 0 开始，对应重建的 `references.json`，不是目标相机 ID |
+| `--reference_pool candidates.json` | 从 JSON 数组或 `{"reference_ids": [0, 10, 20]}` 读取 ID；TXT 支持空格/逗号分隔及 `#` 注释 |
+| `--reference_pool data/candidates` | 以目录中的 PNG/JPG/JPEG 作为候选；文件名必须与重建参考图唯一对应，不能混入未参与重建的新图片 |
+| `--reference_pool_size 200` | 在所选候选池中按参考 ID 均匀减采样为 200 张；省略则不减采样 |
+| `--reference_dir data/all_frames` | 重定位原始参考 RGB 目录，按原文件名匹配；仅要求候选池中图片存在。目录型 reference_pool 已提供路径，不同时使用此参数 |
+
+`--reference_ids` 与 `--reference_pool` 二选一；均省略时，候选为重建的全部参考图。改变候选池只改变参考检索，不删减渲染点云；非候选来源的几何仍参与遮挡估计。`scene.npz` 还包含来源 ID、内参及参考路径，不能仅用不含这些信息的裸 PLY 替代。
+
+当前 robo_lounge 示例，在原图路径有效的服务器项目根目录运行；当前相机为 4×30 帧、1280×960：
+
+```bash
+BASE=outputs/robo_lounge_808_default
+PREP="$BASE/selected120_compare_ref10_pool200"
+
+python -u scripts/prepare_selected_targets.py \
+  --scene "$BASE/reconstruction/scene.npz" \
+  --cameras "$BASE/selected_target_cameras/target_cameras.json" \
+  --output_dir "$PREP" \
+  --num_reference 10 \
+  --reference_pool_size 200 \
+  --reference_method compare
+```
+
+要用全部 808 张候选图，去掉 `--reference_pool_size 200`；要指定自己的子集，改用 ID 或候选目录参数。原始图已迁移时增加 `--reference_dir`。本地下载的点云仍引用 `/home/dev/AnyRecon/...` 的原图路径时，必须在服务器运行或提供可用的原图目录；查看器能打开点云不代表参考 RGB 已在本地。
+
+```text
+selected120_compare_ref10_pool200/
+├── preparation_config.json       # 场景、相机、候选原图和参数，防止错用旧输出
+├── reference_pool.json           # 候选 ID、实际路径和来源路径
+├── selection_comparison.json     # 相同指标下的平均/最差目标覆盖及逐目标覆盖
+├── selection_comparison.html     # 两种方法的参考拼图与覆盖表
+├── renders/rgb/target_*.png       # 共用完整点云目标渲染
+├── renders/mask/target_*.png
+├── original/
+│   ├── condition/*.mp4 + *_info.txt
+│   ├── mask/*.mp4
+│   ├── references/chunk_000/rgb/*.png
+│   ├── references/chunk_000/mask/*.png
+│   ├── reference_sheets/*.jpg
+│   ├── cameras/chunk_000.json     # 输入顺序、RGB/mask 路径、逐帧 c2w/w2c/K
+│   ├── manifest.json + target_cameras.json + metadata.csv
+│   ├── status/chunk_000.json      # 完成标记及真实渲染 mask 覆盖比例
+│   └── generation_command.txt    # 本次输出尺寸和分组模式对应的生成命令
+└── improved/                     # 同样结构，可直接用于 run_AnyRecon.py
+```
+
+仅运行 original 或 improved 时，上述方法子目录的文件直接位于 output_dir。打包的视频内先放参考 RGB（mask 全白），后放本段目标 RGB/mask；保留录制的目标顺序与 chunk 边界，逐帧相机 JSON 的参考 K 对应缩放后的输出尺寸。
+
+先检查 `selection_comparison.html`、参考图和目标 RGB/mask。覆盖指标采用相同采样与候选池，只是几何代理，不能证明最终生成质量；对原图清晰度、风格或生成细节仍需人工检查。original 如果选中数量更少，比较时也应考虑输入帧数差异。选择一套后可以运行其 `generation_command.txt`；对比最终生成时，两套使用相同 seed、推理步数和分辨率。
+
+添加 `--plan_only` 只检索与写报告，去掉后继续渲染打包；original 检索本身依然遍历全部点，不是采样近似。添加 `--chunk_ids 0` 可先完成第一段，之后去掉继续其余段。同参数重跑可恢复，缺失参考 PNG 或无效视频会重新打包；改变场景、相机、候选池、原图或参数时使用新输出目录。完整点云渲染仍可能占用数十 GB CPU 内存，本步骤不执行 GPU 扩散。
+
+### GPU 目标点云渲染
+
+条件准备和单视角检查均支持 `--render_device cuda`，默认仍为 `cpu`。CUDA 后端使用已有 PyTorch，不要求编译新扩展；完整点云只上传一次，复用所有目标视角，执行四邻域 bilinear splat、逐像素深度排序和 alpha-over 混合。不会改成最近点渲染或自动减少点数。浮点归约和等深点排序可能造成像素差异，不保证与 CPU 逐位相同。
+
+在能正常执行 `nvidia-smi`、且当前环境 `torch.cuda.is_available()` 为 True 的终端运行：
+
+```bash
+BASE=outputs/robo_lounge_808_default
+PREP="$BASE/prepared_compare_ref15_pool808"
+
+python -u scripts/prepare_selected_targets.py \
+  --scene "$BASE/reconstruction/scene.npz" \
+  --cameras "$BASE/selected_target_cameras/target_cameras.json" \
+  --reference_dir videos/robo_lounge/seq_aria_robo_lounge_6_20261022_175021/all_frames \
+  --output_dir "$PREP" \
+  --num_reference 15 \
+  --reference_method compare \
+  --render_device cuda \
+  --render_batch_size 1000000
+```
+
+停止旧的 CPU 准备进程后，可以对同一个 PREP 执行以上命令。只要其他参数不变，既有参考检索计划会复用；所请求分段中的 CPU 目标图会用 CUDA 重新渲染，条件视频也会重新打包，避免静默混用。每个目标的 `renders/metadata/target_*.json` 记录后端和耗时；同一后端下已完成的目标可继续复用。
+
+实测 NVIDIA GeForce RTX 4090：100 万点、896×512，在预热后 CPU 约 0.128 秒/帧、CUDA 约 0.011 秒/帧（约 12 倍）；该测试 mask 完全一致，RGB 最大误差为 1 个灰度级。此为小场景测试，不代表 1.56 亿点场景的耗时或显存上限。
+
+`--render_batch_size` 只控制投影阶段的临时数组；全量可见 splat 的排序/混合仍需显存，特别是 1.56 亿点的大场景。显存不足时不能仅凭减小该参数保证成功，应使用显存更充足的 GPU 或切回 CPU。脚本不会降采样点云。该开关仅加速目标渲染，original 参考检索、PNG/视频编码及磁盘读取仍由 CPU 执行；`--plan_only` 不渲染，因此不需要 GPU。
+
+也可先独立检查一个目标，输出目录须为空或不存在：
+
+```bash
+python scripts/render_selected_targets.py \
+  --scene "$BASE/reconstruction/scene.npz" \
+  --cameras "$BASE/selected_target_cameras/target_cameras.json" \
+  --frame_ids 0 \
+  --output_dir "$BASE/check_cuda_target0" \
+  --render_device cuda
+```
 
 ## 来源、致谢与引用
 

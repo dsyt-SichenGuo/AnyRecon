@@ -3,7 +3,7 @@ import numpy as np
 
 
 def visible_source_coverage(points, source_indices, camera, num_references,
-                            width=320, depth_tolerance=0.01):
+                            width=320, depth_tolerance=0.01, candidate_ids=None):
     """Return source x pixel masks using a coarse nearest-depth buffer.
 
     This is a retrieval approximation, never the cloud used for final rendering.
@@ -27,9 +27,60 @@ def visible_source_coverage(points, source_indices, camera, num_references,
     nearest = np.full(width * height, np.inf, dtype=np.float32)
     np.minimum.at(nearest, flat, depth)
     visible = depth <= nearest[flat] * (1 + depth_tolerance) + 1e-6
-    coverage = np.zeros((num_references, width * height), dtype=bool)
-    coverage[sources[visible], flat[visible]] = True
+    candidates = np.arange(num_references) if candidate_ids is None else np.asarray(candidate_ids, dtype=np.int64)
+    mapping = np.full(num_references, -1, dtype=np.int64)
+    mapping[candidates] = np.arange(len(candidates))
+    selected_sources = mapping[sources[visible]]
+    eligible = selected_sources >= 0
+    coverage = np.zeros((len(candidates), width * height), dtype=bool)
+    coverage[selected_sources[eligible], flat[visible][eligible]] = True
     return coverage
+
+
+def original_source_counts(points, colors, source_indices, camera, num_references, block_size=1000000):
+    """Match run_pi3's pre-blending in-frustum, nonblack source counts on ALL points.
+
+    The upstream count includes occluded points; it is not a visibility z-buffer.
+    Blocks bound temporary projection memory without subsampling the point cloud.
+    """
+    E, K = np.asarray(camera['w2c']), np.asarray(camera['K'])
+    width, height = camera['image_size']
+    counts = np.zeros(num_references, dtype=np.int64)
+    for start in range(0, len(points), block_size):
+        end = min(len(points), start + block_size)
+        xyz = np.asarray(points[start:end], dtype=np.float64) @ E[:3, :3].T + E[:3, 3]
+        keep = (xyz[:, 2] > 0.1) & (colors[start:end].sum(axis=1) > 0)
+        projected = xyz[keep] @ K.T
+        uv = projected[:, :2] / (projected[:, 2:3] + 1e-8)
+        inside = ((uv[:, 0] >= -0.5) & (uv[:, 0] < width - 0.5)
+                  & (uv[:, 1] >= -0.5) & (uv[:, 1] < height - 0.5))
+        counts += np.bincount(source_indices[start:end][keep][inside], minlength=num_references)
+    return counts
+
+
+def choose_original_references(counts, count, top_per_target=10):
+    """Upstream: per-target top-10, sum contributions, chunk top-K, then ID order."""
+    aggregate = {}
+    for row in np.asarray(counts):
+        ranked = sorted(np.flatnonzero(row).tolist(), key=lambda i: -int(row[i]))[:top_per_target]
+        for source in ranked:
+            aggregate[source] = aggregate.get(source, 0) + int(row[source])
+    selected = sorted(sorted(aggregate, key=lambda i: -aggregate[i])[:count])
+    if not selected:
+        raise ValueError('No candidate reference contributes projected points to this chunk')
+    return selected, dict(aggregate_source_counts={str(i): value for i, value in aggregate.items()},
+                         top_per_target=top_per_target)
+
+
+def coverage_diagnostic(masks, selected):
+    """One shared sampled-visibility metric for comparing both selection methods."""
+    available = masks.any(axis=1).sum(axis=1)
+    covered = masks[:, selected].any(axis=1).sum(axis=1)
+    fractions = covered / np.maximum(1, available)
+    return dict(selected_coverage_fraction_per_target=fractions.tolist(),
+                sampled_visible_pixels_per_target=available.tolist(),
+                mean_coverage=float(fractions.mean()), min_coverage=float(fractions.min()),
+                targets_without_sampled_candidate_coverage=int(np.sum(available == 0)))
 
 
 def choose_chunk_references(coverage, count):

@@ -127,6 +127,94 @@ class SelectedTargetPreparationTests(unittest.TestCase):
                     self.assertEqual(image.getpixel((0, 0)), (8 + target_id % 4, 0, 0))
             bad = subprocess.run(command + ['--num_reference', '5'], env=environment, capture_output=True)
             self.assertNotEqual(bad.returncode, 0)
+            # Recorded chunk boundaries must survive even when --chunk_size differs.
+            document['chunks'] = [dict(target_ids=[0, 1]), dict(target_ids=list(range(2, 8)))]
+            (root / 'cameras.json').write_text(json.dumps(document))
+            recorded_command = command.copy()
+            recorded_command[recorded_command.index('--output_dir') + 1] = str(root / 'recorded_prepared')
+            subprocess.run(recorded_command + ['--plan_only'], env=environment, check=True, capture_output=True)
+            recorded = json.loads((root / 'recorded_prepared/manifest.json').read_text())
+            self.assertEqual([c['target_ids'] for c in recorded['chunks']], [[0, 1], list(range(2, 8))])
+            # Both methods package identical targets once, with a restricted original-ID pool.
+            comparison_command = recorded_command.copy()
+            comparison_command[comparison_command.index('--output_dir') + 1] = str(root / 'comparison')
+            comparison_command[comparison_command.index('--num_reference') + 1] = '2'
+            comparison_command += ['--reference_method', 'compare', '--reference_ids', '1', '3', '5', '7',
+                                   '--reference_pool_size', '3']
+            subprocess.run(comparison_command, env=environment, check=True, capture_output=True)
+            self.assertEqual(len(list((root / 'comparison/renders/rgb').glob('*.png'))), 8)
+            self.assertTrue((root / 'comparison/selection_comparison.html').is_file())
+            report = json.loads((root / 'comparison/selection_comparison.json').read_text())
+            self.assertEqual(set(report['chunks'][0]['methods']), {'original', 'improved'})
+            pool = json.loads((root / 'comparison/reference_pool.json').read_text())
+            self.assertEqual([entry['reference_id'] for entry in pool['candidates']], [1, 5, 7])
+            for method in ['original', 'improved']:
+                prepared = root / 'comparison' / method
+                manifest = json.loads((prepared / 'manifest.json').read_text())
+                self.assertEqual([c['target_ids'] for c in manifest['chunks']], [[0, 1], list(range(2, 8))])
+                for chunk in manifest['chunks']:
+                    self.assertEqual(len(chunk['reference_ids']), 2)
+                    self.assertTrue(set(chunk['reference_ids']) <= {1, 5, 7})
+                    metadata = json.loads((prepared / chunk['camera_metadata']).read_text())
+                    self.assertEqual([f['role'] for f in metadata['frames']],
+                                     ['reference']*2 + ['target']*len(chunk['target_ids']))
+                    for frame in metadata['frames']:
+                        self.assertTrue((prepared / frame['image']).is_file())
+                        self.assertTrue((prepared / frame['mask']).is_file())
+                        self.assertEqual(frame['image_size'], [64, 48])
+                        np.testing.assert_allclose(np.asarray(frame['w2c']) @ frame['c2w'], np.eye(4))
+                    for frame in chunk['reference_frames']:
+                        image = cv2.imread(str(prepared / frame['image']))
+                        self.assertEqual(int(image[0, 0, 0]), 50 + frame['reference_id']*20)
+                        self.assertTrue((cv2.imread(str(prepared / frame['mask'])) == 255).all())
+                    for folder in ['condition', 'mask']:
+                        cap = cv2.VideoCapture(str(prepared / folder / chunk['video']))
+                        self.assertEqual(int(cap.get(cv2.CAP_PROP_FRAME_COUNT)), 2 + len(chunk['target_ids']))
+                        cap.release()
+                self.assertTrue((prepared / 'generation_command.txt').is_file())
+                # The unchanged generation entry point accepts either method's artifacts.
+                pipe.reset_mock()
+                compare_argv = argv.copy()
+                compare_argv[compare_argv.index('--root_dir') + 1] = str(prepared)
+                compare_argv[compare_argv.index('--output_dir') + 1] = str(root / f'{method}_generated')
+                with patch.dict(sys.modules, {'diffsynth': fake_diff, 'pipeline.anyrecon_pipeline': fake_pipeline}), \
+                        patch.object(sys, 'argv', compare_argv), redirect_stdout(io.StringIO()):
+                    runpy.run_path(str(root_repo / 'run_AnyRecon.py'), run_name='__main__')
+                self.assertEqual([call.kwargs['num_frames'] for call in pipe.call_args_list], [4, 8])
+                self.assertEqual(len(list((root / f'{method}_generated/target_frames').glob('*.png'))), 8)
+            resumed = subprocess.run(comparison_command, env=environment, check=True, capture_output=True, text=True)
+            self.assertIn('already prepared', resumed.stdout)
+            # Missing exported references invalidate completion and are repaired from the source.
+            victim = root / 'comparison/improved' / manifest['chunks'][0]['reference_frames'][0]['image']
+            victim.unlink()
+            subprocess.run(comparison_command, env=environment, check=True, capture_output=True)
+            self.assertTrue(victim.is_file())
+            # Exercise CUDA cache switching/repacking on CPU-only CI using the exact
+            # tensor algorithm on CPU. Hardware CUDA parity is a separate optional test.
+            from pipeline.point_cloud_renderer import TensorSplatRenderer
+            def tensor_backend(points, colors, device, batch_size):
+                self.assertEqual(device, 'cuda')
+                tensor = TensorSplatRenderer(points, colors, 'cpu', batch_size)
+                return SimpleNamespace(backend='cuda_alpha_over_v1', render=tensor.render, close=lambda: None)
+            cuda_argv = comparison_command[1:] + ['--render_device', 'cuda', '--render_batch_size', '5']
+            with patch('torch.cuda.is_available', return_value=True), \
+                    patch('pipeline.point_cloud_renderer.PointCloudRenderer', side_effect=tensor_backend) as factory, \
+                    patch.object(sys, 'argv', cuda_argv), redirect_stdout(io.StringIO()):
+                runpy.run_path(str(root_repo / 'scripts/prepare_selected_targets.py'), run_name='__main__')
+            self.assertEqual(factory.call_count, 1)  # Reuse one uploaded cloud for all targets.
+            for target_id in range(8):
+                meta = json.loads((root / f'comparison/renders/metadata/target_{target_id:06d}.json').read_text())
+                self.assertEqual(meta['backend'], 'cuda_alpha_over_v1')
+            for method in ['original', 'improved']:
+                for i in range(2):
+                    status = json.loads((root / f'comparison/{method}/status/chunk_{i:03d}.json').read_text())
+                    self.assertEqual(status['render_device'], 'cuda')
+            with patch('torch.cuda.is_available', return_value=True), \
+                    patch('pipeline.point_cloud_renderer.PointCloudRenderer') as factory, \
+                    patch.object(sys, 'argv', cuda_argv), redirect_stdout(io.StringIO()) as output:
+                runpy.run_path(str(root_repo / 'scripts/prepare_selected_targets.py'), run_name='__main__')
+            factory.assert_not_called()
+            self.assertIn('already prepared', output.getvalue())
 
 
 if __name__ == '__main__':

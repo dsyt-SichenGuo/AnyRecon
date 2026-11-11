@@ -1,4 +1,4 @@
-"""Serve a dependency-free WebGL fly camera and save calibrated Pi3-world targets."""
+"""Record chunked fly-camera trajectories and save calibrated Pi3-world targets."""
 import argparse
 import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -69,15 +69,21 @@ def make_handler(config, cloud, store, token):
                 self.reply(b'{"error":"Not found"}', status=404)
 
         def do_POST(self):
-            if self.path != '/api/targets' or self.headers.get('X-Save-Token') != token:
+            if self.path not in ('/api/targets', '/api/chunks', '/api/undo') or self.headers.get('X-Save-Token') != token:
                 self.reply(b'{"error":"Invalid endpoint or token"}', status=403)
                 return
             try:
                 size = int(self.headers.get('Content-Length', '0'))
-                if not 0 < size <= 16384:
+                if not 0 < size <= (32 * 1024 * 1024 if self.path == '/api/chunks' else 16384):
                     raise ValueError('Invalid request length')
-                frame_id = store.append(json.loads(self.rfile.read(size)))
-                self.reply(json.dumps(dict(frame_id=frame_id, output_dir=str(store.root.resolve()))).encode())
+                payload = json.loads(self.rfile.read(size))
+                if self.path == '/api/chunks':
+                    result = dict(chunk=store.append_chunk(payload))
+                elif self.path == '/api/undo':
+                    result = dict(restore_camera=store.undo())
+                else:
+                    result = dict(frame_id=store.append(payload))
+                self.reply(json.dumps(dict(result, output_dir=str(store.root.resolve()))).encode())
             except (ValueError, KeyError, TypeError, np.linalg.LinAlgError) as error:
                 self.reply(json.dumps(dict(error=str(error))).encode(), status=400)
             except OSError as error:
