@@ -106,24 +106,42 @@ python scripts/select_target_cameras.py \
   --port 8766
 ```
 
-浏览器打开 `http://127.0.0.1:8766`。保存第一帧前将尺寸设为 896×512，并应用按比例缩放的 K；在网页设置每个 Chunk 的目标帧数 N（2–1000，默认 30），按 R（或 T）开始录制，自由移动后再次按 R 结束；整段沿相机位置轨迹按累计距离等间隔重采样成 N 个目标相机，包含首尾，位置线性插值、旋转球面插值，不做额外平滑。可连续记录多个 Chunk，每段可设置不同 N。按 U 或 Ctrl+Z 撤销当前录制并返回起点；未在录制时则删除上一个完整 Chunk 并返回其录制前视角。完成后 Ctrl+C 停止查看器。相机使用 Pi3 世界坐标系和 OpenCV 轴约定。远程节点没有浏览器访问方式时，可下载同一份 scene 缓存到本地选相机，再上传目标相机 JSON/NPZ；节点上的原始参考图路径需保持有效。
+浏览器打开 `http://127.0.0.1:8766`。保存第一段前将尺寸设为 896×512，并应用按比例缩放的 K。网页设置前进帧数 n 和环绕帧数 m（默认 5 和 25；n≥1、m≥3、n+m≤1000）。移动到要采集全景的位置，选择起始朝向，**按一次 R（或 T）即可生成并保存整个 Chunk**，无需开始/结束实时录制。
+
+每段先从上一段的最后一个目标相机，直线移动到当前点，按距离均匀生成 n 帧，同时球面插值朝向；n≥2 时包含移动首尾，n=1 时只取到达点。第一段从打开网页时的初始参考相机出发。随后固定相机位置，按 360°/m 步长水平转头，生成 m 帧；第一张环绕图位于第一个角度步长处，最后一张完整转过 360° 回到起始朝向，因此前进终点与第一张环绕图不会重复。没有位置移动时仍可生成原地全景，前进帧的位置相同。全过程不记录时间。
+
+水平面的向上方向默认取初始参考相机的上轴，网页可切换世界 ±X/±Y/±Z；若地面倾斜应先调整。全景起始朝向会被校正为水平并去除滚转；接近竖直的朝向需先手动转向水平方向。保存后视角位于本段闭环终点，可继续移动到下一全景点。按 U 或 Ctrl+Z 撤销整个 Chunk 并返回其前进起点；保存失败时 R 重试同一段，U 放弃。支持继续读取已有轨迹，但新实验建议使用新的 output_dir，避免混入之前的采集结果。完成后 Ctrl+C 停止查看器。相机仍使用 Pi3 世界坐标系和 OpenCV 轴约定。
+
+继续采集已有轨迹有两种方式：直接将 `--output_dir` 指向原来的采集目录，脚本会自动恢复；或用 `--load_targets` 将原轨迹加载到新的输出目录，保留源文件。例如：
+
+```bash
+python scripts/select_target_cameras.py \
+  --scene outputs/robo_lounge_808_default/reconstruction/scene.npz \
+  --load_targets outputs/robo_lounge_808_run02/selected_target_cameras \
+  --output_dir outputs/robo_lounge_808_run03/selected_target_cameras \
+  --port 8766
+```
+
+`--load_targets` 接受目录或 `target_cameras.json` 文件路径。也可以启动空输出目录后，在网页“加载已有目标轨迹”中选择本地 JSON，再点击“加载 JSON 并继续采集”。网页会返回最后一帧，恢复输出尺寸、内参，以及最后一个全景 chunk 的 n/m 和向上方向；之后按 R 在原有目标编号和 chunk 编号之后追加。JSON 包含完整的 chunk 元数据，NPZ 无需手动加载，保存时会自动同步生成。导入会检查场景坐标系和分段边界；输出目录已有另一套轨迹时会拒绝覆盖，请改用空目录。
+
+追加相机后，后续 `prepare_selected_targets.py` 请使用新的准备输出目录，因为原准备结果对应的是旧目标相机文件。
 
 ```bash
 python scripts/prepare_selected_targets.py \
   --scene "$RUN/reconstruction/scene.npz" \
   --cameras "$RUN/selected_target_cameras/target_cameras.json" \
   --output_dir "$RUN/preprocess" \
-  --chunk_size 4 --num_reference 6
+  --num_reference 6 --context_chunks
 
 python run_AnyRecon.py \
   --root_dir "$RUN/preprocess" \
   --output_dir "$RUN/generated" \
   --lora_path AnyRecon_full_attention.ckpt \
   --width 896 --height 512 \
-  --independent_chunks --export_target_frames
+  --context_chunks --export_target_frames
 ```
 
-轨迹文件中的 `chunks` 记录分段边界；打包时自动沿用录制边界，`--chunk_size` 仅用于没有 chunk 信息的旧相机文件。所有 Chunk 使用相同输出尺寸，N 越大单组生成显存需求越高。JSON 保存每段帧数、路径长度、采样距离及目标 ID，NPZ 额外保存 `chunk_offsets/chunk_ids`。撤销会同步更新两份文件。
+轨迹文件中的 `chunks` 记录分段边界；打包时自动沿用录制边界，`--chunk_size` 仅用于没有 chunk 信息的旧相机文件。所有 Chunk 使用相同输出尺寸，n+m 越大单组生成显存需求越高。新 Chunk 的 JSON 保存前进/环绕帧数、各自目标 ID、向上轴、环绕角度、前进距离及采样距离；旧距离轨迹仍能读取。NPZ 额外保存 `chunk_offsets/chunk_ids`。撤销会同步更新两份文件。
 
 检查条件 RGB/mask 和参考拼图后再生成。最终图片位于 `generated/target_frames/`，相机对应关系位于 `generated/target_mapping.json`。重新推理使用新的输出目录；准备阶段可按同参数恢复。相邻组需要携带历史输出时，准备与推理两阶段都使用 `--context_chunks`，推理省略 `--independent_chunks`。
 
@@ -189,6 +207,30 @@ selected120_compare_ref10_pool200/
 
 添加 `--plan_only` 只检索与写报告，去掉后继续渲染打包；original 检索本身依然遍历全部点，不是采样近似。添加 `--chunk_ids 0` 可先完成第一段，之后去掉继续其余段。同参数重跑可恢复，缺失参考 PNG 或无效视频会重新打包；改变场景、相机、候选池、原图或参数时使用新输出目录。完整点云渲染仍可能占用数十 GB CPU 内存，本步骤不执行 GPU 扩散。
 
+### GPU 参考帧检索
+
+`--render_device cuda` 只控制目标渲染。参考检索需要另外添加 `--retrieval_device cuda`（默认 cpu）。CUDA 检索会将点云上传一次：original 用 float64 分批投影全部点并累计来源计数；improved 在相同采样点和检索尺寸上计算最近深度、可见来源覆盖及覆盖增益选择。候选池以外的点仍参与遮挡，不自动减少点数、候选图数量或参考图数量。原文 top-K 排序和小型统计报告保留在 CPU，improved 的大型覆盖矩阵及增益计算留在 GPU。
+
+例如继续处理新的 25 段轨迹：
+
+```bash
+BASE=outputs/robo_lounge_808_run02
+python -u scripts/prepare_selected_targets.py \
+  --scene outputs/robo_lounge_808_default/reconstruction/scene.npz \
+  --cameras "$BASE/selected_target_cameras/target_cameras.json" \
+  --output_dir "$BASE/prepared_compare_ref15_pool808" \
+  --reference_dir videos/robo_lounge/seq_aria_robo_lounge_6_20261022_175021/all_frames \
+  --num_reference 15 --reference_method compare --context_chunks \
+  --retrieval_device cuda --retrieval_batch_size 1000000 \
+  --render_device cuda --render_batch_size 1000000
+```
+
+新版本每完成一个 chunk 就原子保存检索 manifest。中断后保持原参数与输出目录重跑，会复用已完成的参考选择，只补缺失的 chunk；已有完整 CPU 检索结果也会复用，不因切换 CUDA 而强制重算。仍在运行的旧进程需先用 Ctrl+C 停止，再执行新命令。不要同时写入同一个输出目录。改变候选池、采样点数、检索宽度、参考数量等选择参数仍需新目录。
+
+`--retrieval_batch_size` 控制 original 投影临时张量大小，不限制常驻点云和覆盖矩阵显存；30 个目标、808 张候选图、320×240 检索尺寸的布尔覆盖矩阵约 1.73 GiB，另需点云和计算临时空间。GPU 检索缓存在目标渲染之前释放。CUDA 不可用时会报错，不静默切换到 CPU。浮点运算顺序可能让恰好落在投影/深度阈值上的点产生差异，不保证所有场景逐位一致。
+
+RTX 4090 的合成基准（100 万点、6 个目标、808 候选、检索宽 320，预热后且不计首次上传）：improved 投影及选择 CPU 1.621 秒、CUDA 0.085 秒，约 19 倍；original 全点贡献计数 CPU 0.198 秒、CUDA 0.015 秒，约 13 倍。该数据上覆盖掩码、参考选择和原文计数一致。这不是 1.56 亿点真实场景的完整运行耗时。
+
 ### GPU 目标点云渲染
 
 条件准备和单视角检查均支持 `--render_device cuda`，默认仍为 `cpu`。CUDA 后端使用已有 PyTorch，不要求编译新扩展；完整点云只上传一次，复用所有目标视角，执行四邻域 bilinear splat、逐像素深度排序和 alpha-over 混合。不会改成最近点渲染或自动减少点数。浮点归约和等深点排序可能造成像素差异，不保证与 CPU 逐位相同。
@@ -214,7 +256,11 @@ python -u scripts/prepare_selected_targets.py \
 
 实测 NVIDIA GeForce RTX 4090：100 万点、896×512，在预热后 CPU 约 0.128 秒/帧、CUDA 约 0.011 秒/帧（约 12 倍）；该测试 mask 完全一致，RGB 最大误差为 1 个灰度级。此为小场景测试，不代表 1.56 亿点场景的耗时或显存上限。
 
-`--render_batch_size` 只控制投影阶段的临时数组；全量可见 splat 的排序/混合仍需显存，特别是 1.56 亿点的大场景。显存不足时不能仅凭减小该参数保证成功，应使用显存更充足的 GPU 或切回 CPU。脚本不会降采样点云。该开关仅加速目标渲染，original 参考检索、PNG/视频编码及磁盘读取仍由 CPU 执行；`--plan_only` 不渲染，因此不需要 GPU。
+CUDA 渲染现在先保留紧凑的可见点投影，再按图像区域自适应分块展开四邻域 splat、排序和混合，避免整帧一次性存储和排序全部 splat。跨图块的 bilinear 贡献分别归入对应像素，不减少点数。`--render_batch_size` 控制投影临时数组；新增 `--render_max_splats` 控制每块排序的 splat 数量预算，默认 32000000。排序 OOM 时会自动继续细分图块。常驻点云、紧凑投影和排序工作空间仍需显存，该预算不是整个进程的显存上限；极端单像素密集场景无法继续细分时会明确报错。
+
+例如大点云遇到排序 OOM 后，停止旧进程，保持原输入及输出目录和其他参数不变，增加 `--render_batch_size 500000 --render_max_splats 16000000` 后重跑。已有参考检索计划和已完成的 CUDA 目标图会复用，从缺失目标继续。需要更低排序显存时可进一步减小 render_max_splats，代价是更多图块和更长耗时。若点云及紧凑投影本身也无法放入 GPU，则使用更大显存或 `--render_device cpu`。
+
+目标渲染和参考检索分别由 render_device / retrieval_device 控制；PNG/视频编码及磁盘读取仍在 CPU。`--plan_only` 不渲染目标，但选择 `--retrieval_device cuda` 时仍需 GPU。
 
 也可先独立检查一个目标，输出目录须为空或不存在：
 

@@ -130,13 +130,15 @@ def select_references(method, masks, counts, candidate_ids, count, top_per_targe
         diagnostic['aggregate_source_counts'] = {
             str(candidate_ids[int(i)]): value for i, value in diagnostic['aggregate_source_counts'].items()}
     else:
-        selected, diagnostic = choose_chunk_references(masks, count)
+        selected, diagnostic = (choose_chunk_references(masks, count) if isinstance(masks, np.ndarray)
+                                else masks.choose(count))
         # Strongest selected image is first for image/CLIP conditioning, as in our improved workflow.
-        contribution = masks.sum(axis=(0, 2))
+        contribution = masks.sum(axis=(0, 2)) if isinstance(masks, np.ndarray) else masks.contribution()
         selected = sorted(selected, key=lambda i: (-int(contribution[i]), candidate_ids[i]))
         for field in ['selection_order', 'best_reference_per_target']:
             diagnostic[field] = [candidate_ids[i] for i in diagnostic[field]]
-    diagnostic.update(coverage_diagnostic(masks, selected))
+    diagnostic.update(coverage_diagnostic(masks, selected) if isinstance(masks, np.ndarray)
+                      else masks.diagnostic(selected))
     diagnostic['candidate_reference_ids'] = candidate_ids
     return [candidate_ids[i] for i in selected], diagnostic
 
@@ -235,19 +237,22 @@ def main():
     parser.add_argument('--retrieval_points', type=int, default=2000000, help='Improved retrieval and shared comparison metric only')
     parser.add_argument('--retrieval_width', type=int, default=320)
     parser.add_argument('--depth_tolerance', type=float, default=0.01)
-    parser.add_argument('--render_device', choices=['cpu', 'cuda'], default='cpu', help='Target rendering only; reference retrieval is unchanged')
-    parser.add_argument('--render_batch_size', type=int, default=1000000, help='CUDA projection batch size; does not cap visible-splat sort memory')
+    parser.add_argument('--retrieval_device', choices=['cpu', 'cuda'], default='cpu', help='Reference projection, visibility and improved coverage selection backend')
+    parser.add_argument('--retrieval_batch_size', type=int, default=1000000, help='Original CUDA retrieval projection batch size; all cloud points are still counted')
+    parser.add_argument('--render_device', choices=['cpu', 'cuda'], default='cpu', help='Target rendering backend (separate from retrieval_device)')
+    parser.add_argument('--render_batch_size', type=int, default=1000000, help='CUDA projection batch size')
+    parser.add_argument('--render_max_splats', type=int, default=32000000, help='Maximum splat budget per adaptive CUDA sorting tile; does not subsample points')
     parser.add_argument('--context_chunks', action='store_true')
     parser.add_argument('--plan_only', action='store_true', help='Select references and write comparison sheets; skip full rendering/packaging')
     parser.add_argument('--chunk_ids', nargs='+', type=int, help='Render/package only these chunks; default all')
     args = parser.parse_args()
-    if (min(args.chunk_size, args.num_reference, args.original_top_per_target, args.retrieval_points, args.retrieval_width, args.render_batch_size) < 1
+    if (min(args.chunk_size, args.num_reference, args.original_top_per_target, args.retrieval_points, args.retrieval_width, args.render_batch_size, args.retrieval_batch_size, args.render_max_splats) < 1
             or not np.isfinite(args.depth_tolerance) or args.depth_tolerance < 0):
         parser.error('Counts must be positive and depth_tolerance finite/nonnegative')
-    if args.render_device == 'cuda' and not args.plan_only:
+    if args.retrieval_device == 'cuda' or (args.render_device == 'cuda' and not args.plan_only):
         import torch
         if not torch.cuda.is_available():
-            parser.error('CUDA is unavailable in this process; check nvidia-smi and PyTorch, or use --render_device cpu')
+            parser.error('CUDA is unavailable in this process; check nvidia-smi and PyTorch, or use CPU backends')
     document = json.loads(args.cameras.read_text())
     cameras = [validate_camera(c) for c in document['cameras']]
     if not cameras or len({tuple(c['image_size']) for c in cameras}) != 1:
@@ -308,7 +313,13 @@ def main():
             manifest = json.loads(path.read_text())
             if manifest['settings'] != settings:
                 parser.error('Existing manifest has different settings; choose a new output_dir')
+            if (len(manifest['chunks']) > len(target_groups) or
+                    any(c['chunk_id'] != i or c['target_ids'] != target_groups[i]
+                        for i, c in enumerate(manifest['chunks']))):
+                parser.error('Existing reference plan has invalid chunk boundaries')
             manifests[method] = manifest
+            if len(manifest['chunks']) < len(target_groups):
+                missing.append(method)
         else:
             missing.append(method)
             manifests[method] = dict(schema_version=2, scene_id=identity, settings=settings, image_size=size,
@@ -324,7 +335,7 @@ def main():
         return full
 
     if missing:
-        print(f'Candidate pool: {len(pool)} / {len(reference_paths)}; methods={methods}', flush=True)
+        print(f'Candidate pool: {len(pool)} / {len(reference_paths)}; methods={methods}; retrieval={args.retrieval_device}', flush=True)
         if 'original' in missing:
             print('Original retrieval counts ALL cloud points (including occluded points), as in run_pi3.py.', flush=True)
             full_cloud(with_sources=True)
@@ -338,22 +349,46 @@ def main():
             keep = colors.sum(axis=1) > 0
             sample, sources = sample[keep], sources[keep]
             del colors
+        retriever = None
+        if args.retrieval_device == 'cuda':
+            from pipeline.cuda_reference_selection import CudaReferenceRetriever, CudaCoverage
+            print('Uploading retrieval cloud to CUDA once; retaining full-cloud original counts.', flush=True)
+            retriever = CudaReferenceRetriever(sample, sources, len(reference_paths), candidate_ids,
+                points=full.get('points') if 'original' in missing else None,
+                colors=full.get('colors'), full_sources=full.get('source_indices'),
+                batch_size=args.retrieval_batch_size)
         for chunk_id, target_ids in enumerate(target_groups):
-            masks = np.stack([visible_source_coverage(sample, sources, cameras[i], len(reference_paths),
-                              args.retrieval_width, args.depth_tolerance, candidate_ids=candidate_ids) for i in target_ids])
+            needed = [method for method in missing if len(manifests[method]['chunks']) <= chunk_id]
+            if not needed:
+                continue
+            started = time.perf_counter()
+            print(f'Retrieving chunk {chunk_id + 1}/{len(target_groups)}: {len(target_ids)} targets ({args.retrieval_device})', flush=True)
+            if retriever is None:
+                masks = np.stack([visible_source_coverage(sample, sources, cameras[i], len(reference_paths),
+                                  args.retrieval_width, args.depth_tolerance, candidate_ids=candidate_ids) for i in target_ids])
+            else:
+                masks = CudaCoverage(retriever.chunk_coverage([cameras[i] for i in target_ids],
+                                     args.retrieval_width, args.depth_tolerance))
             counts = None
-            if 'original' in missing:
+            if 'original' in needed:
                 counts = np.stack([original_source_counts(full['points'], full['colors'], full['source_indices'],
-                                   cameras[i], len(reference_paths))[candidate_ids] for i in target_ids])
-            for method in missing:
+                                   cameras[i], len(reference_paths))[candidate_ids] if retriever is None
+                                   else retriever.original_counts(cameras[i]) for i in target_ids])
+            for method in needed:
                 ids, diagnostic = select_references(method, masks, counts, candidate_ids,
                                                     args.num_reference, args.original_top_per_target)
+                diagnostic['retrieval_backend'] = args.retrieval_device
+                diagnostic['elapsed_chunk_seconds'] = time.perf_counter() - started
                 chunk = chunk_description(chunk_id, target_ids, ids, resolved_paths, method, diagnostic)
                 manifests[method]['chunks'].append(chunk)
+                # A completed chunk survives interruption; later runs reuse its selection.
+                dump_json(method_roots[method] / 'manifest.json', manifests[method])
                 print(f'{method}: chunk {chunk_id}, {len(target_ids)} targets, refs={ids}, '
                       f'mean/min coverage={diagnostic["mean_coverage"]:.3f}/{diagnostic["min_coverage"]:.3f}', flush=True)
             del masks, counts
-        del sample, sources
+        del sample, sources, retriever
+        if args.retrieval_device == 'cuda':
+            torch.cuda.empty_cache()  # Release retrieval buffers before the full-cloud renderer.
         for method in missing:
             dump_json(method_roots[method] / 'manifest.json', manifests[method])
     for method, output in method_roots.items():
@@ -388,7 +423,8 @@ def main():
                 or not render_backend_matches(root, target_id, args.render_device)):
             cloud = full_cloud()
             if renderer is None:
-                renderer = PointCloudRenderer(cloud['points'], cloud['colors'], args.render_device, args.render_batch_size)
+                renderer = PointCloudRenderer(cloud['points'], cloud['colors'], args.render_device,
+                                              args.render_batch_size, args.render_max_splats)
             print(f'Rendering target {target_id} using ALL {len(cloud["points"]):,} points ({args.render_device}).', flush=True)
             camera = cameras[target_id]
             started = time.perf_counter()
@@ -397,7 +433,8 @@ def main():
                 raise OSError('Failed to save target render')
             dump_json(root / 'renders/metadata' / f'target_{target_id:06d}.json',
                       dict(backend=renderer.backend, render_seconds=time.perf_counter()-started,
-                           point_count=len(cloud['points']), image_size=size))
+                           point_count=len(cloud['points']), image_size=size,
+                           render_max_splats=args.render_max_splats))
             print(f'Target {target_id} rendered in {time.perf_counter()-started:.2f}s', flush=True)
         if not np.any(mask[:, :, 0] > 0):
             raise ValueError(f'Target {target_id} has an empty full-cloud mask; inspect pose before generation')

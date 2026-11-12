@@ -5,7 +5,8 @@
 /Pi3/assets/
 
 # Server access material and local agent/editor configuration.
-/server/
+/server/*
+!/server/RUN02_GENERATION.md
 /.aws/
 /.agents/
 /.codex/

@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -58,6 +59,39 @@ class PointCloudRendererTests(unittest.TestCase):
         self.assert_matches_original(np.array([[0, 0, 2], [.02, .01, 1]], np.float32),
                                      np.array([[.9, .3, .1], [.2, .8, .4]], np.float32))
 
+    def test_adaptive_tiles_preserve_seams_and_bound_sort_size(self):
+        rng = np.random.default_rng(99)
+        points = rng.uniform([-1, -.8, 1], [1, .8, 3], (2000, 3)).astype(np.float32)
+        # A bilinear splat straddles the central boundaries x=32 and y=24.
+        points = np.concatenate((points, [[-.0125, -.5/42, 1]]))
+        colors = rng.integers(1, 256, (len(points), 3), dtype=np.uint8)
+        expected, expected_mask = TensorSplatRenderer(points, colors, 'cpu', 137).render(self.camera())
+        tiled = TensorSplatRenderer(points, colors, 'cpu', 137, max_splats=128)
+        actual, mask = tiled.render(self.camera())
+        self.assertGreater(tiled.last_tile_count, 1)
+        self.assertLessEqual(tiled.last_max_tile_splats, 128)
+        np.testing.assert_allclose(actual.astype(float), expected.astype(float), atol=1)
+        np.testing.assert_array_equal(mask, expected_mask)
+
+    def test_sort_oom_retries_smaller_tiles(self):
+        points = np.array([[-.1, -.1, 1], [.1, .1, 1.1]], np.float32)
+        colors = np.array([[255, 80, 0], [0, 80, 255]], np.uint8)
+        renderer = TensorSplatRenderer(points, colors, 'cpu')
+        expected, expected_mask = renderer.render(self.camera())
+        original = renderer._render_tile
+        first = True
+        def fail_once(*args):
+            nonlocal first
+            if first:
+                first = False
+                raise torch.cuda.OutOfMemoryError('Simulated sort allocation failure')
+            return original(*args)
+        with patch.object(renderer, '_render_tile', side_effect=fail_once):
+            actual, mask = renderer.render(self.camera())
+        self.assertGreater(renderer.last_tile_count, 1)
+        np.testing.assert_allclose(actual.astype(float), expected.astype(float), atol=1)
+        np.testing.assert_array_equal(mask, expected_mask)
+
     def test_backend_cache_records_and_packaging_status_are_both_checked(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -82,7 +116,7 @@ class PointCloudRendererTests(unittest.TestCase):
         points = rng.uniform([-.6, -.4, .5], [.6, .4, 3], (500, 3)).astype(np.float32)
         colors = rng.integers(1, 256, (500, 3), dtype=np.uint8)
         expected, expected_mask = TensorSplatRenderer(points, colors, 'cpu', 101).render(self.camera())
-        renderer = PointCloudRenderer(points, colors, 'cuda', 101)
+        renderer = PointCloudRenderer(points, colors, 'cuda', 101, max_splats=256)
         actual, mask = renderer.render(self.camera())
         renderer.close()
         np.testing.assert_allclose(actual.astype(float), expected.astype(float), atol=1)

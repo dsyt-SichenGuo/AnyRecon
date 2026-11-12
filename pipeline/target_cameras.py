@@ -91,6 +91,55 @@ def sample_trajectory(recording):
     return cameras, float(distances[-1]), requested.tolist(), base
 
 
+def sample_advance_panorama(recording, previous_camera=None):
+    """Straight positional advance followed by an in-place, level 360-degree yaw."""
+    from scipy.spatial.transform import Rotation, Slerp
+
+    n, m = recording['advance_frames'], recording['panorama_frames']
+    if (type(n) is not int or type(m) is not int or n < 1 or m < 3
+            or n + m > MAX_CHUNK_FRAMES):
+        raise ValueError('Use advance_frames >= 1, panorama_frames >= 3, total <= 1000')
+    destination = validate_camera(recording['camera'])
+    start = validate_camera(previous_camera if previous_camera is not None else recording['start_camera'])
+    if start['image_size'] != destination['image_size']:
+        raise ValueError('Advance start and destination must share image_size')
+    up = np.asarray(recording['world_up'], dtype=float)
+    if up.shape != (3,) or not np.isfinite(up).all() or np.linalg.norm(up) < 1e-8:
+        raise ValueError('world_up must be a nonzero finite 3-vector')
+    up /= np.linalg.norm(up)
+    end_pose = np.asarray(destination['c2w'])
+    forward = end_pose[:3, 2] - up * np.dot(end_pose[:3, 2], up)
+    if np.linalg.norm(forward) < 1e-6:
+        raise ValueError('Look horizontally before generating: camera faces the vertical axis')
+    forward /= np.linalg.norm(forward)
+    right = np.cross(forward, up)
+    level = end_pose.copy()
+    level[:3, :3] = np.column_stack((right, -up, forward))
+    start_pose = np.asarray(start['c2w'])
+    fractions = np.linspace(0, 1, n) if n > 1 else np.ones(1)
+    interpolate = Slerp([0, 1], Rotation.from_matrix(np.stack((start_pose[:3, :3], level[:3, :3]))))
+    cameras = []
+    for fraction, rotation in zip(fractions, interpolate(fractions).as_matrix()):
+        pose = np.eye(4)
+        pose[:3, :3] = rotation
+        pose[:3, 3] = (1 - fraction) * start_pose[:3, 3] + fraction * level[:3, 3]
+        calibration = (1 - fraction) * np.asarray(start['K']) + fraction * np.asarray(destination['K'])
+        cameras.append(validate_camera(dict(destination, c2w=pose, K=calibration)))
+    degrees = np.linspace(360 / m, 360, m)
+    angles = np.radians(degrees)
+    for angle in angles:
+        pose = level.copy()
+        pose[:3, :3] = Rotation.from_rotvec(up * angle).as_matrix() @ level[:3, :3]
+        cameras.append(validate_camera(dict(destination, c2w=pose)))
+    # Exact closure avoids accumulating rotation error across many chunks.
+    cameras[-1] = validate_camera(dict(destination, c2w=level))
+    distance = float(np.linalg.norm(level[:3, 3] - start_pose[:3, 3]))
+    metadata = dict(kind='advance_panorama', sampling='linear_distance_and_uniform_yaw',
+                    advance_frames=n, panorama_frames=m, world_up=up.tolist(),
+                    panorama_angles_degrees=degrees.tolist())
+    return cameras, distance, (fractions * distance).tolist() + [distance] * m, start, metadata
+
+
 class TargetCameraStore:
     """Atomic JSON is authoritative; NPZ retains flat cameras plus explicit chunk offsets."""
     def __init__(self, output_dir, scene_path, scene_id):
@@ -118,6 +167,36 @@ class TargetCameraStore:
                     world_coordinates='Unmodified source Pi3 world; arbitrary scale',
                     image_size_order='width,height', chunks=self.chunks,
                     cameras=[dict(frame_id=i, **c) for i, c in enumerate(self.cameras)])
+
+    def import_document(self, document):
+        """Seed an empty output from a saved JSON, preserving chunk metadata/IDs."""
+        if not isinstance(document, dict) or document.get('scene_id') != self.scene_id:
+            raise ValueError('Imported cameras belong to a different scene coordinate system')
+        cameras = [validate_camera(c) for c in document['cameras']]
+        if not cameras:
+            raise ValueError('Imported trajectory contains no target cameras')
+        if len({tuple(c['image_size']) for c in cameras}) != 1:
+            raise ValueError('Imported chunks must share one output image_size')
+        groups = target_chunk_groups(document, len(cameras))
+        chunks = []
+        for i, group in enumerate(groups):
+            chunk = dict(document.get('chunks', [{}] * len(groups))[i],
+                         chunk_id=i, target_ids=group, frame_count=len(group))
+            if 'restore_camera' in chunk:
+                chunk['restore_camera'] = validate_camera(chunk['restore_camera'])
+            if chunk.get('kind') == 'advance_panorama':
+                n, m = chunk['advance_frames'], chunk['panorama_frames']
+                if type(n) is not int or type(m) is not int or n < 1 or m < 3 or n + m != len(group):
+                    raise ValueError('Imported panorama chunk has inconsistent frame counts')
+                up = np.asarray(chunk['world_up'], dtype=float)
+                if up.shape != (3,) or not np.isfinite(up).all() or np.linalg.norm(up) < 1e-8:
+                    raise ValueError('Imported panorama chunk has invalid world_up')
+            chunks.append(chunk)
+        if self.cameras:
+            if self.cameras == cameras and self.chunks == chunks:
+                return  # Idempotent retry, including --load_targets from the same output.
+            raise ValueError('Output already has another trajectory; use a new --output_dir to import without overwriting it')
+        self._persist(cameras, chunks)
 
     def _write_npz(self):
         with (self.root / 'target_cameras.npz.tmp').open('wb') as stream:
@@ -165,7 +244,12 @@ class TargetCameraStore:
                     raise ValueError('recording_id already belongs to a different trajectory')
                 self._write_npz()
                 return existing
-        cameras, path_length, distances, restore = sample_trajectory(recording)
+        metadata = {}
+        if recording.get('kind') == 'advance_panorama':
+            cameras, path_length, distances, restore, metadata = sample_advance_panorama(
+                recording, self.cameras[-1] if self.cameras else None)
+        else:
+            cameras, path_length, distances, restore = sample_trajectory(recording)
         if self.cameras and cameras[0]['image_size'] != self.cameras[0]['image_size']:
             raise ValueError('All recorded chunks must share one output image_size')
         start = len(self.cameras)
@@ -173,6 +257,11 @@ class TargetCameraStore:
                      frame_count=len(cameras), path_length=path_length, sample_distances=distances,
                      sampling='position_arc_length',
                      kind='recorded', restore_camera=restore)
+        chunk.update(metadata)
+        if metadata:
+            split = start + metadata['advance_frames']
+            chunk.update(advance_target_ids=list(range(start, split)),
+                         panorama_target_ids=list(range(split, start + len(cameras))))
         if recording_id is not None:
             chunk.update(recording_id=recording_id, recording_sha256=fingerprint)
         self._persist(self.cameras + cameras, self.chunks + [chunk])

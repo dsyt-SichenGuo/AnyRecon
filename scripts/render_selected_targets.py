@@ -20,9 +20,10 @@ def main():
     parser.add_argument('--frame_ids', nargs='+', type=int, help='Default: render all saved targets')
     parser.add_argument('--render_device', choices=['cpu', 'cuda'], default='cpu')
     parser.add_argument('--render_batch_size', type=int, default=1000000)
+    parser.add_argument('--render_max_splats', type=int, default=32000000)
     args = parser.parse_args()
-    if args.render_batch_size <= 0:
-        parser.error('render_batch_size must be positive')
+    if args.render_batch_size <= 0 or args.render_max_splats <= 0:
+        parser.error('render_batch_size and render_max_splats must be positive')
     if args.render_device == 'cuda':
         import torch
         if not torch.cuda.is_available():
@@ -40,7 +41,7 @@ def main():
             parser.error('Targets belong to a different Pi3 world coordinate frame')
         print('Loading FULL point cloud into CPU RAM (not the browser preview subset).', flush=True)
         points, colors = scene['points'], scene['colors']
-    renderer = PointCloudRenderer(points, colors, args.render_device, args.render_batch_size)
+    renderer = PointCloudRenderer(points, colors, args.render_device, args.render_batch_size, args.render_max_splats)
     for folder in ['rgb', 'mask']:
         (args.output_dir / folder).mkdir(parents=True, exist_ok=True)
     for frame_id in selected:

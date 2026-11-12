@@ -1,17 +1,22 @@
 <!doctype html>
 <html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Pi3 自由相机 · 轨迹录制</title>
+<title>Pi3 自由相机 · 前进 + 全景采集</title>
 <style>
 *{box-sizing:border-box}body{margin:0;background:#10161d;color:#e1ebf1;font:14px system-ui}main{display:flex;height:100vh}#stage{flex:1;min-width:0;display:flex;align-items:center;justify-content:center;background:#05080c;position:relative}canvas{display:block;touch-action:none;outline:none}aside{width:340px;overflow:auto;padding:20px;background:#19232e}h1{font-size:20px;margin:0 0 14px}h2{font-size:15px;margin:20px 0 8px}p{line-height:1.7;color:#b0c4d3}label{display:block;margin:7px 0}input,select,button{background:#253747;color:#f0f5fa;border:1px solid #476074;border-radius:5px;padding:7px;max-width:100%}button{cursor:pointer;margin:4px 2px 4px 0}button:hover{background:#37556c}button:disabled{opacity:.5;cursor:wait}input[type=number]{width:100%}.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.primary{background:#176a85;width:100%;font-weight:600}#status{white-space:pre-wrap;overflow-wrap:anywhere;color:#79dcd4}#pose{white-space:pre-wrap;font:12px monospace;color:#aac4da}#hud{position:absolute;top:12px;left:14px;pointer-events:none;background:#10161dbb;padding:8px;color:#a7c7da}#targets button{display:block;width:100%;text-align:left}small{color:#a3b5c3}kbd{background:#314658;padding:1px 4px;border-radius:3px}a{color:#7de0fa}
 </style>
 <main><div id="stage"><canvas id="view" tabindex="0"></canvas><div id="hud">加载点云…</div></div><aside>
-<h1>自由相机 / Chunk 轨迹录制</h1>
+<h1>自由相机 / Chunk 前进 + 全景采集</h1>
 <p>拖动鼠标改变朝向，中键拖动平移。点击画面后使用 <kbd>W A S D</kbd> 前后左右，<kbd>Q / E</kbd> 下降 / 上升，<kbd>Z / X</kbd> 滚转，<kbd>Shift</kbd> 加速。滚轮前后移动。移动方向跟随相机，无碰撞限制。</p>
 <button id="lock">锁定鼠标自由观察</button><small>Esc 解除锁定</small>
 <label>移动速度（重建单位/秒）<input id="speed" type="number" step="0.01" min="0.000001"></label>
 <label>点大小 <input id="pointsize" type="range" min="1" max="8" step="0.5" value="2"></label>
 <label><input id="showcams" type="checkbox" checked> 显示参考相机和已保存目标的视锥</label>
 <h2>从参考相机开始</h2><select id="reference" style="width:100%"></select><button id="jump">跳转到参考相机</button>
+<h2>加载已有目标轨迹</h2>
+<input id="targetfile" type="file" accept=".json,application/json">
+<button id="loadtargets">加载 JSON 并继续采集</button>
+<small>选择已有目录内的 target_cameras.json，保留原有 chunk 和编号，从最后一帧继续追加。结果保存到本次 output_dir；加载另一套轨迹时请使用新的空输出目录。</small>
+<div id="outputpath" style="overflow-wrap:anywhere"></div>
 <h2>输出尺寸 / 针孔内参</h2><small>宽高须为 16 的倍数。画面黑边之外的区域对应保存的完整输出画幅；浏览器预览不是最终点云 splat 渲染。</small>
 <div class="grid"><label>宽<input id="width" type="number" value="1280" step="16"></label><label>高<input id="height" type="number" value="960" step="16"></label></div>
 <button id="resize">应用尺寸并按比例缩放 K</button>
@@ -19,30 +24,37 @@
 <button id="applyK">应用内参</button><button id="resetK">使用参考相机内参</button>
 <label>预览近裁剪面<input id="near" type="number" step="0.001" min="0.000001" value="0.1"></label>
 <small>原项目点云渲染保留相机 Z &gt; 0.1 的点。此项只控制预览裁剪，不改相机位姿或 K。</small>
-<h2>按 Chunk 录制轨迹</h2>
-<label>当前 Chunk 的目标帧数 N<input id="framecount" type="number" min="2" max="1000" step="1" value="30"></label>
-<small>沿相机位置轨迹按累计距离等间隔采样为 N 帧，包含起点和终点。录制时锁定尺寸与内参；每段可设置不同的 N，所有段须使用相同输出尺寸。</small>
-<button id="record" class="primary">开始录制（R / T）</button>
-<button id="undo">撤销并返回录制前视角（U / Ctrl+Z）</button>
-<div id="recording" role="status" aria-live="polite">尚未开始录制</div>
+<h2>前进 + 原地水平转头一周</h2>
+<div class="grid"><label>前进帧 n<input id="advancecount" type="number" min="1" max="997" step="1" value="5"></label><label>环绕帧 m<input id="panoramacount" type="number" min="3" max="999" step="1" value="25"></label></div>
+<label>水平面的向上方向<select id="upaxis">
+<option value="initial">初始参考相机向上（默认）</option>
+<option value="loaded" id="loadedup" disabled>已加载轨迹的向上方向</option>
+<option value="y">世界 +Y</option><option value="-y">世界 −Y</option>
+<option value="z">世界 +Z</option><option value="-z">世界 −Z</option>
+<option value="x">世界 +X</option><option value="-x">世界 −X</option>
+</select></label>
+<small>移动到新的全景点并面向水平方向，按一次 R 保存 n+m 帧。前进段从上段终点直线等距取帧（n≥2 时包含首尾，n=1 时仅取到达点），朝向球面插值；随后原地按 360°/m 等角度转头，最后一帧回到起始朝向。水平转头会消除俯仰和滚转。n+m 不超过 1000。</small>
+<button id="record" class="primary">生成并保存当前 Chunk（R / T）</button>
+<button id="undo">撤销并返回上一段终点（U / Ctrl+Z）</button>
+<div id="recording" role="status" aria-live="polite">尚未保存 Chunk</div>
 <p id="status">加载中…</p><div id="pose"></div><h2>已录制 Chunks（展开可返回任意帧）</h2><div id="targets"></div>
-<p><a href="/api/targets" target="_blank">查看全部目标 JSON</a><br>每次开始/结束保存一整段轨迹，可连续记录多个 Chunk。撤销录制中的轨迹会取消本段；未在录制时撤销上一整段。世界坐标和尺度保持 Pi3 原值，OpenCV 相机轴：右 X、下 Y、前 Z。只按位置轨迹距离重采样，不记录时间；停顿不增加目标帧，纯原地旋转不能形成一段轨迹。切换到后台标签页时自动结束本段。</p>
+<p><a href="/api/targets" target="_blank">查看全部目标 JSON</a><br>每次按 R 保存一个完整 Chunk，可连续采集多个点。第一段从打开页面时的初始相机连接到当前点；以后从上一段最后一帧连接。U 撤销整个 Chunk 并返回其起点。世界坐标和尺度保持 Pi3 原值，OpenCV 相机轴：右 X、下 Y、前 Z。不记录时间，也不按时间选帧。若场景地面倾斜，请选择正确的向上方向。</p>
 </aside></main>
 <script>
 'use strict';
 const $=id=>document.getElementById(id), canvas=$('view'), stage=$('stage'), keys=new Set();
 const token='__SAVE_TOKEN__';
-let cfg, camera, K, W=1280,H=960, cloudBuffer, npoints=0, lineBuffer, lineCount=0, targets=[], chunks=[], last=0, saving=false, recording=null, pendingRecording=null;
-let gl, program, loc;
+let cfg, camera, K, W=1280,H=960, cloudBuffer, npoints=0, lineBuffer, lineCount=0, targets=[], chunks=[], last=0, saving=false, initialCamera=null, pendingRecording=null;
+let gl, program, loc, loadedWorldUp=null;
 const dot=(a,b)=>a.reduce((s,x,i)=>s+x*b[i],0), cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
 const norm=a=>{const s=Math.hypot(...a);return a.map(x=>x/s);};
 const column=i=>[camera[0][i],camera[1][i],camera[2][i]], center=()=>column(3);
 function setColumn(i,v){for(let j=0;j<3;j++)camera[j][i]=v[j];}
 function rotate(axis,angle){axis=norm(axis);const c=Math.cos(angle),s=Math.sin(angle);
  for(let i=0;i<3;i++){let v=column(i),t=cross(axis,v),d=dot(axis,v);setColumn(i,v.map((x,j)=>x*c+t[j]*s+axis[j]*d*(1-c)));}
- const r=norm(column(0)),d0=column(1),d=norm(d0.map((x,j)=>x-r[j]*dot(r,d0)));setColumn(0,r);setColumn(1,d);setColumn(2,cross(r,d));captureRecording();
+ const r=norm(column(0)),d0=column(1),d=norm(d0.map((x,j)=>x-r[j]*dot(r,d0)));setColumn(0,r);setColumn(1,d);setColumn(2,cross(r,d));
 }
-function move(x,y,z){let c=center(),r=column(0),d=column(1),f=column(2);setColumn(3,c.map((v,i)=>v+x*r[i]+y*d[i]+z*f[i]));captureRecording();}
+function move(x,y,z){let c=center(),r=column(0),d=column(1),f=column(2);setColumn(3,c.map((v,i)=>v+x*r[i]+y*d[i]+z*f[i]));}
 function notify(text,error=false){$('status').textContent=text;$('status').style.color=error?'#ffac96':'#79dcd4';}
 function updateFields(){for(const [id,v] of [['fx',K[0][0]],['fy',K[1][1]],['cx',K[0][2]],['cy',K[1][2]]])$(id).value=v.toFixed(6);}
 function referenceK(){const ref=cfg.intrinsics[+$('reference').value];K=ref.map((row,i)=>row.map(v=>v*(i===0?W/cfg.image_size[0]:i===1?H/cfg.image_size[1]:1)));updateFields();}
@@ -82,42 +94,47 @@ function draw(time){let dt=Math.min((time-last)/1000||0,.05);last=time;
  const near=Math.max(1e-6,+$('near').value||.1);gl.uniform1f(loc.nearPlane,near);gl.uniform1f(loc.farPlane,Math.max(cfg.span*100,near*100));gl.uniform1f(loc.pointSize,+$('pointsize').value);
  bindBuffer(cloudBuffer);gl.uniform1i(loc.roundPoints,1);gl.drawArrays(gl.POINTS,0,npoints);
  if($('showcams').checked){bindBuffer(lineBuffer);gl.uniform1i(loc.roundPoints,0);gl.drawArrays(gl.LINES,0,lineCount);}
- if(recording){captureRecording();$('recording').textContent=`● 录制中 · 路径长度 ${recording.path_length.toFixed(5)} · ${recording.samples.length} 个轨迹点 → ${recording.frame_count} 帧`;if(recording.samples.length>=19999)stopRecording();}
+
  const c=center(),f=column(2);$('pose').textContent='位置: '+c.map(x=>x.toFixed(5)).join(', ')+'\n朝向: '+f.map(x=>x.toFixed(5)).join(', ');
  }requestAnimationFrame(draw);
 }
 function currentCamera(){return {c2w:structuredClone(camera),K:structuredClone(K),image_size:[W,H]};}
 function restoreCamera(target){keys.clear();camera=structuredClone(target.c2w);K=structuredClone(target.K);[W,H]=target.image_size;$('width').value=W;$('height').value=H;updateFields();resizeCanvas();canvas.focus();}
-function updateControls(){const busy=saving||!!recording||!!pendingRecording;
- for(const id of ['reference','jump','width','height','resize','fx','fy','cx','cy','applyK','resetK','framecount'])$(id).disabled=busy;
- $('record').disabled=saving;$('record').textContent=recording?'结束并保存当前 Chunk（R / T）':pendingRecording?'重试保存当前 Chunk（R / T）':'开始录制（R / T）';
- $('undo').disabled=saving||(!recording&&!pendingRecording&&!chunks.length);
+function updateControls(){const busy=saving||!!pendingRecording;
+ for(const id of ['reference','jump','width','height','resize','fx','fy','cx','cy','applyK','resetK','advancecount','panoramacount','upaxis','targetfile','loadtargets'])$(id).disabled=busy;
+ $('record').disabled=saving;$('record').textContent=pendingRecording?'重试保存当前 Chunk（R / T）':'生成并保存当前 Chunk（R / T）';
+ $('undo').disabled=saving||(!pendingRecording&&!chunks.length);
  for(const button of $('targets').querySelectorAll('button'))button.disabled=busy;
 }
 async function refreshTargets(){const response=await fetch('/api/targets');if(!response.ok)throw Error('读取已保存相机失败');const doc=await response.json();targets=doc.cameras;chunks=doc.chunks||[];
- $('targets').replaceChildren();chunks.forEach(chunk=>{const detail=document.createElement('details'),summary=document.createElement('summary');summary.textContent=`Chunk ${chunk.chunk_id} · ${chunk.target_ids.length} 帧`+(chunk.path_length!==undefined?` · 路径 ${chunk.path_length.toFixed(5)}`:'');detail.append(summary);
- chunk.target_ids.forEach(i=>{const target=targets[i],button=document.createElement('button');button.textContent=`目标 ${i} · ${target.image_size.join(' × ')}`;button.onclick=()=>{if(!saving&&!recording&&!pendingRecording)restoreCamera(target);};detail.append(button);});$('targets').append(detail);});updateLines();updateControls();}
-function captureRecording(force=false){if(!recording)return;const previous=recording.samples.at(-1).c2w;
- if(!camera.some((row,i)=>row.some((value,j)=>value!==previous[i][j])))return;
- if(recording.samples.length>=(force?20000:19999))return;
- recording.path_length+=Math.hypot(...[0,1,2].map(i=>camera[i][3]-previous[i][3]));
- recording.samples.push({c2w:structuredClone(camera)});}
-function startRecording(){if(saving||recording||pendingRecording||!camera)return;const count=+$('framecount').value;
- if(!Number.isInteger(count)||count<2||count>1000)return notify('N 必须是 2..1000 的整数。',true);
- if(targets.length&&targets[0].image_size.some((v,i)=>v!==[W,H][i]))return notify('本组所有 Chunk 需要同一输出尺寸，请使用新目录记录其他尺寸。',true);
- const base=currentCamera();recording={recording_id:crypto.randomUUID(),camera:base,frame_count:count,path_length:0,samples:[{c2w:structuredClone(camera)}]};
- updateControls();canvas.focus();notify('正在实时录制。自由移动相机，按 R / T 结束本段；U 撤销本段并返回起点。');}
+ $('targets').replaceChildren();chunks.forEach(chunk=>{const detail=document.createElement('details'),summary=document.createElement('summary');summary.textContent=`Chunk ${chunk.chunk_id} · ${chunk.target_ids.length} 帧`+(chunk.kind==='advance_panorama'?`（前进 ${chunk.advance_frames} + 环绕 ${chunk.panorama_frames}）`:'')+(chunk.path_length!==undefined?` · 路径 ${chunk.path_length.toFixed(5)}`:'');detail.append(summary);
+ chunk.target_ids.forEach(i=>{const target=targets[i],button=document.createElement('button');button.textContent=`目标 ${i} · ${target.image_size.join(' × ')}`;button.onclick=()=>{if(!saving&&!pendingRecording)restoreCamera(target);};detail.append(button);});$('targets').append(detail);});updateLines();updateControls();}
+function resumeTargets(){if(!targets.length)return;restoreCamera(targets.at(-1));const chunk=chunks.at(-1);
+ if(chunk?.kind==='advance_panorama'){$('advancecount').value=chunk.advance_frames;$('panoramacount').value=chunk.panorama_frames;loadedWorldUp=norm(chunk.world_up);$('loadedup').disabled=false;$('upaxis').value='loaded';}}
+async function loadTargets(){if(saving||pendingRecording)return;const file=$('targetfile').files?.[0];if(!file)return notify('请先选择 target_cameras.json。',true);
+ saving=true;keys.clear();updateControls();try{if(file.size>32*1024*1024)throw Error('轨迹 JSON 超过 32 MiB，无法加载。');
+ const doc=JSON.parse(await file.text());const result=await sendMutation('/api/import',doc);await refreshTargets();resumeTargets();
+ $('recording').textContent=`已加载 ${chunks.length} 个 Chunk / ${targets.length} 个目标视角`;
+ notify(`已加载 ${file.name}，已返回最后一帧。继续移动后按 R 追加。\n保存目录：${result.output_dir}`);
+ }catch(error){notify(error.message,true);}finally{saving=false;updateControls();}}
+function panoramaUp(){const value=$('upaxis').value;if(value==='loaded'&&loadedWorldUp)return [...loadedWorldUp];if(value==='initial')return norm(initialCamera.c2w.slice(0,3).map(row=>-row[1]));const axis=value.at(-1),sign=value.startsWith('-')?-1:1;return ['x','y','z'].map(v=>v===axis?sign:0);}
+function startRecording(){if(saving||pendingRecording||!camera)return;const n=+$('advancecount').value,m=+$('panoramacount').value;
+ if(!Number.isInteger(n)||!Number.isInteger(m)||n<1||m<3||n+m>1000)return notify('前进 n≥1，环绕 m≥3，且总帧数不超过 1000；均须为整数。',true);
+ if(targets.length&&targets[0].image_size.some((v,i)=>v!==[W,H][i]))return notify('所有 Chunk 需要同一输出尺寸，请使用新目录记录其他尺寸。',true);
+ const up=panoramaUp(),f=column(2);if(Math.hypot(...f.map((v,i)=>v-up[i]*dot(f,up)))<1e-6)return notify('当前朝向接近竖直，请先转向水平方向。',true);
+ const start=structuredClone(targets.at(-1)||initialCamera);if(!targets.length){start.image_size=[W,H];start.K=structuredClone(K);}
+ pendingRecording={kind:'advance_panorama',recording_id:crypto.randomUUID(),camera:currentCamera(),start_camera:start,advance_frames:n,panorama_frames:m,world_up:up};
+ canvas.focus();savePending();}
 async function sendMutation(path,payload){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Save-Token':token},body:JSON.stringify(payload)});const result=await response.json();if(!response.ok)throw Error(result.error||'保存失败');return result;}
 async function savePending(){if(saving||!pendingRecording)return;saving=true;keys.clear();updateControls();try{
- const result=await sendMutation('/api/chunks',pendingRecording);pendingRecording=null;await refreshTargets();
+ const result=await sendMutation('/api/chunks',pendingRecording);await refreshTargets();pendingRecording=null;restoreCamera(targets.at(-1));
  $('recording').textContent=`已保存 ${chunks.length} 个 Chunk / ${targets.length} 个目标视角`;
  notify(`已保存 Chunk ${result.chunk.chunk_id}：${result.chunk.frame_count} 帧\n${result.output_dir}\ntarget_cameras.json / target_cameras.npz`);
  }catch(error){notify(error.message+(pendingRecording?'；轨迹暂存在本页，按 R 重试或 U 放弃，勿刷新页面。':''),true);}finally{saving=false;updateControls();}}
-function stopRecording(){if(saving||!recording)return;captureRecording(true);if(!(recording.path_length>0)){notify('位置轨迹长度为零：请移动相机后再结束录制，或按 U 取消。原地旋转不按距离分配帧。',true);return;}const {path_length,...payload}=recording;recording=null;pendingRecording=payload;canvas.focus();savePending();}
-function toggleRecording(){if(saving)return;if(recording)stopRecording();else if(pendingRecording)savePending();else startRecording();}
-async function undo(){if(saving)return;const active=recording||pendingRecording;
- if(active){recording=null;pendingRecording=null;restoreCamera(active.camera);$('recording').textContent='本段已取消，返回录制起点';notify('已取消当前 Chunk，之前保存的 Chunks 保留。');updateControls();return;}
- if(!chunks.length)return;saving=true;keys.clear();updateControls();try{const result=await sendMutation('/api/undo',{});restoreCamera(result.restore_camera);await refreshTargets();$('recording').textContent=`剩余 ${chunks.length} 个 Chunk / ${targets.length} 个目标视角`;notify('已撤销上一整个 Chunk，并返回该段录制前视角。');}catch(error){notify(error.message,true);}finally{saving=false;updateControls();}}
+function toggleRecording(){if(saving)return;if(pendingRecording)savePending();else startRecording();}
+async function undo(){if(saving)return;const active=pendingRecording;
+ if(active){pendingRecording=null;restoreCamera(active.start_camera);$('recording').textContent='本段已取消，返回上一段终点';notify('已取消当前 Chunk，之前保存的 Chunks 保留。');updateControls();return;}
+ if(!chunks.length)return;saving=true;keys.clear();updateControls();try{const result=await sendMutation('/api/undo',{});restoreCamera(result.restore_camera);await refreshTargets();$('recording').textContent=`剩余 ${chunks.length} 个 Chunk / ${targets.length} 个目标视角`;notify('已撤销上一整个 Chunk，并返回该段起点。');}catch(error){notify(error.message,true);}finally{saving=false;updateControls();}}
 function setupEvents(){canvas.addEventListener('contextmenu',e=>e.preventDefault());canvas.addEventListener('pointerdown',e=>{canvas.focus();canvas.setPointerCapture(e.pointerId);});
  document.addEventListener('mousemove',e=>{if(!camera||saving||pendingRecording)return;const locked=document.pointerLockElement===canvas;if(!locked&&e.target!==canvas)return;
  if(locked||(e.buttons&1)||(e.buttons&2)){rotate(column(1),e.movementX*.003);rotate(column(0),-e.movementY*.003);}else if(e.buttons&4){const scale=(+$('speed').value||0)*.003;move(-e.movementX*scale,-e.movementY*scale,0);}});
@@ -126,12 +143,12 @@ function setupEvents(){canvas.addEventListener('contextmenu',e=>e.preventDefault
  if((e.ctrlKey||e.metaKey)&&k==='z'){e.preventDefault();if(!e.repeat)undo();return;}if(e.ctrlKey||e.metaKey||e.altKey)return;
  if(['r','t','u'].includes(k)){e.preventDefault();if(!e.repeat){if(k==='u')undo();else toggleRecording();}return;}
  if(saving||pendingRecording)return;if(['w','a','s','d','q','e','z','x','Shift'].includes(k))e.preventDefault();keys.add(k);});
- document.addEventListener('keyup',e=>keys.delete(e.key==='Shift'?'Shift':e.key.toLowerCase()));window.addEventListener('blur',()=>keys.clear());document.addEventListener('focusin',e=>{if(['INPUT','SELECT','TEXTAREA'].includes(e.target.tagName))keys.clear();});document.addEventListener('visibilitychange',()=>{keys.clear();if(document.hidden&&recording)stopRecording();});window.addEventListener('beforeunload',e=>{if(recording||pendingRecording||saving){e.preventDefault();e.returnValue='';}});
+ document.addEventListener('keyup',e=>keys.delete(e.key==='Shift'?'Shift':e.key.toLowerCase()));window.addEventListener('blur',()=>keys.clear());document.addEventListener('focusin',e=>{if(['INPUT','SELECT','TEXTAREA'].includes(e.target.tagName))keys.clear();});document.addEventListener('visibilitychange',()=>{keys.clear();});window.addEventListener('beforeunload',e=>{if(pendingRecording||saving){e.preventDefault();e.returnValue='';}});
  $('lock').onclick=()=>{canvas.focus();if(canvas.requestPointerLock)canvas.requestPointerLock();else notify('此浏览器不支持鼠标锁定，可拖动画面观察。',true);};
- $('jump').onclick=jumpReference;$('resetK').onclick=referenceK;$('record').onclick=toggleRecording;$('undo').onclick=undo;
+ $('jump').onclick=jumpReference;$('resetK').onclick=referenceK;$('record').onclick=toggleRecording;$('undo').onclick=undo;$('loadtargets').onclick=loadTargets;
  $('resize').onclick=()=>{const w=+$('width').value,h=+$('height').value;if(![w,h].every(n=>Number.isInteger(n)&&n>=16&&n<=16384&&n%16===0))return notify('宽高须为 16..16384 内的 16 的倍数。',true);K=K.map((row,i)=>row.map(v=>v*(i===0?w/W:i===1?h/H:1)));W=w;H=h;updateFields();resizeCanvas();notify('已应用输出尺寸，fx/cx 按宽缩放，fy/cy 按高缩放。');};
  $('applyK').onclick=()=>{const [fx,fy,cx,cy]=['fx','fy','cx','cy'].map(id=>+$(id).value);if(![fx,fy,cx,cy].every(Number.isFinite)||fx<=0||fy<=0)return notify('焦距必须为正，内参必须为有限数值。',true);K=[[fx,0,cx],[0,fy,cy],[0,0,1]];notify('内参已应用，保存时将使用当前 K。');};window.addEventListener('resize',resizeCanvas);
 }
-(async()=>{try{cfg=await(await fetch('/api/config')).json();initGL();cfg.sources.forEach((source,i)=>{const option=document.createElement('option');option.value=i;option.textContent=`参考 ${i} · ${source.split('/').pop()}`;$('reference').append(option);});$('speed').value=(cfg.span*.08).toPrecision(4);jumpReference();
- const response=await fetch('/api/points');if(!response.ok)throw Error('点云读取失败');const data=new Float32Array(await response.arrayBuffer());cloudBuffer=makeBuffer(data);npoints=data.length/6;await refreshTargets();resizeCanvas();setupEvents();$('hud').textContent=`显示 ${cfg.shown_points.toLocaleString()} / ${cfg.total_points.toLocaleString()} 点 · ${W} × ${H}`;$('recording').textContent=`已保存 ${chunks.length} 个 Chunk / ${targets.length} 个目标视角`;notify('准备就绪。设置 N 后按 R 开始/结束录制，U 撤销并返回上个视角。');requestAnimationFrame(draw);}catch(error){notify(error.message,true);$('hud').textContent='初始化失败，见右侧错误';}})();
+(async()=>{try{cfg=await(await fetch('/api/config')).json();initGL();cfg.sources.forEach((source,i)=>{const option=document.createElement('option');option.value=i;option.textContent=`参考 ${i} · ${source.split('/').pop()}`;$('reference').append(option);});$('speed').value=(cfg.span*.08).toPrecision(4);jumpReference();initialCamera=currentCamera();
+ const response=await fetch('/api/points');if(!response.ok)throw Error('点云读取失败');const data=new Float32Array(await response.arrayBuffer());cloudBuffer=makeBuffer(data);npoints=data.length/6;await refreshTargets();resumeTargets();resizeCanvas();setupEvents();$('outputpath').textContent='保存目录：'+cfg.output_dir;$('hud').textContent=`显示 ${cfg.shown_points.toLocaleString()} / ${cfg.total_points.toLocaleString()} 点 · ${W} × ${H}`;$('recording').textContent=`已保存 ${chunks.length} 个 Chunk / ${targets.length} 个目标视角`;notify(targets.length?'已恢复已有轨迹，当前位于最后一帧；移动到新位置后按 R 继续追加。':'准备就绪。可加载已有 JSON，或移动到全景点后按 R 保存；U 撤销。');requestAnimationFrame(draw);}catch(error){notify(error.message,true);$('hud').textContent='初始化失败，见右侧错误';}})();
 </script></html>

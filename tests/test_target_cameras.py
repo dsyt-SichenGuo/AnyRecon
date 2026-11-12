@@ -120,6 +120,20 @@ class TargetCameraTests(unittest.TestCase):
                     self.assertEqual(json.load(response)['restore_camera'], validate_camera(self.camera()))
                 self.assertEqual(len(store.cameras), 1)
                 self.assertEqual(len(store.chunks), 1)
+                request = Request(base + '/api/import', json.dumps(store.document()).encode(), method='POST')
+                with self.assertRaises(HTTPError) as error:
+                    urlopen(request)
+                self.assertEqual(error.exception.code, 403)
+                request.add_header('X-Save-Token', 'token')
+                with urlopen(request) as response:
+                    self.assertEqual(json.load(response)['frame_count'], 1)
+                wrong = dict(store.document(), scene_id='wrong-world')
+                request = Request(base + '/api/import', json.dumps(wrong).encode(), method='POST',
+                                  headers={'X-Save-Token': 'token'})
+                with self.assertRaises(HTTPError) as error:
+                    urlopen(request)
+                self.assertEqual(error.exception.code, 400)
+                self.assertEqual(len(store.cameras), 1)
             finally:
                 server.shutdown()
                 server.server_close()

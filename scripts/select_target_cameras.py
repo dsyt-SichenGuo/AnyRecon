@@ -1,4 +1,4 @@
-"""Record chunked fly-camera trajectories and save calibrated Pi3-world targets."""
+"""Select straight-advance + horizontal panorama chunks in the Pi3 world frame."""
 import argparse
 import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -43,6 +43,7 @@ def load_viewer_scene(path, max_points):
 
 
 def make_handler(config, cloud, store, token):
+    config = dict(config, output_dir=str(store.root.resolve()))
     page = (Path(__file__).with_name('target_camera_viewer.html').read_text()
             .replace('__SAVE_TOKEN__', token)).encode()
 
@@ -69,15 +70,18 @@ def make_handler(config, cloud, store, token):
                 self.reply(b'{"error":"Not found"}', status=404)
 
         def do_POST(self):
-            if self.path not in ('/api/targets', '/api/chunks', '/api/undo') or self.headers.get('X-Save-Token') != token:
+            if self.path not in ('/api/targets', '/api/chunks', '/api/undo', '/api/import') or self.headers.get('X-Save-Token') != token:
                 self.reply(b'{"error":"Invalid endpoint or token"}', status=403)
                 return
             try:
                 size = int(self.headers.get('Content-Length', '0'))
-                if not 0 < size <= (32 * 1024 * 1024 if self.path == '/api/chunks' else 16384):
+                if not 0 < size <= (32 * 1024 * 1024 if self.path in ('/api/chunks', '/api/import') else 16384):
                     raise ValueError('Invalid request length')
                 payload = json.loads(self.rfile.read(size))
-                if self.path == '/api/chunks':
+                if self.path == '/api/import':
+                    store.import_document(payload)
+                    result = dict(frame_count=len(store.cameras), chunk_count=len(store.chunks))
+                elif self.path == '/api/chunks':
                     result = dict(chunk=store.append_chunk(payload))
                 elif self.path == '/api/undo':
                     result = dict(restore_camera=store.undo())
@@ -96,12 +100,22 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--scene', required=True, type=Path)
     parser.add_argument('--output_dir', required=True, type=Path)
+    parser.add_argument('--load_targets', type=Path, help='Load target_cameras.json or its directory into an empty output; omit to resume output_dir automatically')
     parser.add_argument('--max_points', type=int, default=1000000, help='Display cap only; 0 = full cloud')
     parser.add_argument('--port', type=int, default=8766)
     args = parser.parse_args()
     print('Loading scene on CPU; no Pi3 or AnyRecon models are loaded.', flush=True)
     config, cloud, scene_id = load_viewer_scene(args.scene, args.max_points)
     store = TargetCameraStore(args.output_dir, args.scene, scene_id)
+    if args.load_targets is not None:
+        source = args.load_targets
+        if source.is_dir():
+            source = source / 'target_cameras.json'
+        try:
+            store.import_document(json.loads(source.read_text()))
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            parser.error(f'Cannot load target cameras: {error}')
+    print(f'Resuming {len(store.chunks)} chunks / {len(store.cameras)} target cameras.', flush=True)
     server = HTTPServer(('127.0.0.1', args.port), make_handler(config, cloud, store, secrets.token_hex(24)))
     print(f'Displaying {config["shown_points"]:,}/{config["total_points"]:,} points', flush=True)
     print(f'Open http://127.0.0.1:{args.port} — targets saved to {store.root.resolve()}', flush=True)

@@ -76,6 +76,17 @@ class SelectedTargetPreparationTests(unittest.TestCase):
             manifest = json.loads((root / 'prepared/manifest.json').read_text())
             self.assertEqual([c['target_ids'] for c in manifest['chunks']], [[0, 1, 2, 3], [4, 5, 6, 7]])
             self.assertEqual(list((root / 'prepared/condition').glob('*.mp4')), [])
+            # Simulate an interrupted reference plan: reuse the persisted first
+            # chunk, compute only the missing second chunk, and retain its timing.
+            partial = dict(manifest, chunks=manifest['chunks'][:1])
+            (root / 'prepared/manifest.json').write_text(json.dumps(partial))
+            resumed_plan = subprocess.run(command + ['--plan_only'], env=environment,
+                                          check=True, capture_output=True, text=True)
+            self.assertNotIn('Retrieving chunk 1/2', resumed_plan.stdout)
+            self.assertIn('Retrieving chunk 2/2', resumed_plan.stdout)
+            repaired = json.loads((root / 'prepared/manifest.json').read_text())
+            self.assertEqual(repaired['chunks'][0], manifest['chunks'][0])
+            self.assertEqual(len(repaired['chunks']), 2)
             subprocess.run(command, env=environment, check=True, capture_output=True)
             for chunk in manifest['chunks']:
                 for folder in ['condition', 'mask']:
@@ -192,9 +203,9 @@ class SelectedTargetPreparationTests(unittest.TestCase):
             # Exercise CUDA cache switching/repacking on CPU-only CI using the exact
             # tensor algorithm on CPU. Hardware CUDA parity is a separate optional test.
             from pipeline.point_cloud_renderer import TensorSplatRenderer
-            def tensor_backend(points, colors, device, batch_size):
+            def tensor_backend(points, colors, device, batch_size, max_splats):
                 self.assertEqual(device, 'cuda')
-                tensor = TensorSplatRenderer(points, colors, 'cpu', batch_size)
+                tensor = TensorSplatRenderer(points, colors, 'cpu', batch_size, max_splats)
                 return SimpleNamespace(backend='cuda_alpha_over_v1', render=tensor.render, close=lambda: None)
             cuda_argv = comparison_command[1:] + ['--render_device', 'cuda', '--render_batch_size', '5']
             with patch('torch.cuda.is_available', return_value=True), \
