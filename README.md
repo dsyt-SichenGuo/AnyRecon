@@ -207,6 +207,30 @@ selected120_compare_ref10_pool200/
 
 添加 `--plan_only` 只检索与写报告，去掉后继续渲染打包；original 检索本身依然遍历全部点，不是采样近似。添加 `--chunk_ids 0` 可先完成第一段，之后去掉继续其余段。同参数重跑可恢复，缺失参考 PNG 或无效视频会重新打包；改变场景、相机、候选池、原图或参数时使用新输出目录。完整点云渲染仍可能占用数十 GB CPU 内存，本步骤不执行 GPU 扩散。
 
+### 用环绕目标帧选择参考图
+
+`--reference_target_scope panorama` 为默认策略：对于 `advance_panorama` 类型的 chunk，按其实际 `advance_frames` 排除前进段，仅由环绕帧参与 original 的贡献计数汇总、improved 的覆盖增益选择，以及参考图强度排序。默认 5+25 的 chunk 就只用后 25 帧检索，但完整 30 帧仍然渲染、打包并生成。没有前进/环绕标签的旧轨迹继续使用全部目标帧，不能盲目删除前 5 帧。`--reference_target_scope all` 恢复旧策略；需要严格复现原始全目标检索基线时使用 all。
+
+这样可以减少重复前进朝向对选择结果的偏置，但前进途中独有的可见区域不再参与优化，不保证其参考覆盖或最终生成质量。对比报告中的覆盖率也只针对参与检索的环绕帧；manifest 的 `retrieval_target_ids` / `excluded_target_ids` 记录实际使用与排除的目标 ID。
+
+切换范围需使用新的准备输出目录，避免复用旧参考选择。已渲染好的目标图可用 `--reuse_renders_from` 复用，不必再渲染点云。例如：
+
+```bash
+BASE=outputs/robo_lounge_808_run02
+python -u scripts/prepare_selected_targets.py \
+  --scene outputs/robo_lounge_808_reconstruction/scene.npz \
+  --cameras "$BASE/selected_target_cameras/target_cameras.json" \
+  --output_dir "$BASE/prepared_panorama_compare_ref15_pool808" \
+  --reuse_renders_from "$BASE/prepared_compare_ref15_pool808" \
+  --reference_dir videos/robo_lounge/seq_aria_robo_lounge_6_20261022_175021/all_frames \
+  --num_reference 15 --reference_method compare \
+  --reference_target_scope panorama --context_chunks \
+  --retrieval_device cuda --render_device cuda \
+  --render_batch_size 500000 --render_max_splats 16000000
+```
+
+复用前会核对源场景路径/大小/修改时间、目标相机文件哈希、图像尺寸及渲染后端。只复制兼容的目标 RGB/mask 和渲染记录，重新选择参考图并重新打包视频；缺失或不兼容的渲染图按正常流程生成。新输入位于 `prepared_panorama_compare_ref15_pool808/improved`（或 original）；旧目录及其参考选择保留。`--plan_only` 只做参考检索，不复制目标渲染图。
+
 ### GPU 参考帧检索
 
 `--render_device cuda` 只控制目标渲染。参考检索需要另外添加 `--retrieval_device cuda`（默认 cpu）。CUDA 检索会将点云上传一次：original 用 float64 分批投影全部点并累计来源计数；improved 在相同采样点和检索尺寸上计算最近深度、可见来源覆盖及覆盖增益选择。候选池以外的点仍参与遮挡，不自动减少点数、候选图数量或参考图数量。原文 top-K 排序和小型统计报告保留在 CPU，improved 的大型覆盖矩阵及增益计算留在 GPU。

@@ -6,6 +6,7 @@ from html import escape
 import json
 from pathlib import Path
 import shlex
+import shutil
 import sys
 import time
 
@@ -124,6 +125,64 @@ def resolve_reference_pool(reference_paths, *, reference_ids=None, reference_poo
     return pool
 
 
+def reference_target_groups(document, groups, scope):
+    """Change retrieval views only; never change rendered/packaged chunk boundaries."""
+    if scope == 'all':
+        return groups
+    result = []
+    recorded = document.get('chunks', [])
+    for i, ids in enumerate(groups):
+        chunk = recorded[i] if i < len(recorded) else {}
+        if chunk.get('kind') != 'advance_panorama':
+            result.append(ids)  # Legacy trajectories have no reliable segment labels.
+            continue
+        n, m = chunk['advance_frames'], chunk['panorama_frames']
+        if (type(n) is not int or type(m) is not int or n < 1 or m < 3 or n + m != len(ids)):
+            raise ValueError(f'Chunk {i} has inconsistent advance/panorama counts')
+        panorama = ids[n:]
+        if chunk.get('panorama_target_ids', panorama) != panorama:
+            raise ValueError(f'Chunk {i} has inconsistent panorama_target_ids')
+        result.append(panorama)
+    return result
+
+
+def reuse_target_renders(source, destination, settings, size, device, target_ids):
+    """Copy compatible target renders to a new preparation; references are reselected."""
+    source = Path(source)
+    prior = json.loads((source / 'preparation_config.json').read_text())
+    for key in ['scene_path', 'scene_size', 'scene_mtime_ns', 'cameras_sha256']:
+        if prior.get(key) != settings.get(key):
+            raise ValueError(f'Render cache has incompatible {key}; do not reuse another scene/trajectory')
+    copied = 0
+    for i in target_ids:
+        if not render_backend_matches(source, i, device):
+            continue
+        name = f'target_{i:06d}'
+        paths = [Path('renders') / folder / f'{name}.png' for folder in ['rgb', 'mask']]
+        images = [cv2.imread(str(source / p)) for p in paths]
+        if any(image is None or image.shape != (size[1], size[0], 3) for image in images):
+            continue
+        metadata = Path('renders/metadata') / f'{name}.json'
+        if (render_backend_matches(destination, i, device)
+                and all((destination / relative).is_file() for relative in paths)):
+            cached = [cv2.imread(str(destination / p)) for p in paths]
+            if all(image is not None and image.shape == (size[1], size[0], 3) for image in cached):
+                copied += 1
+                continue
+        for relative in paths:
+            target = destination / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_suffix(target.suffix + '.reuse.tmp')
+            shutil.copy2(source / relative, temporary)
+            temporary.replace(target)
+        # Write the backend marker last; never attach a CUDA marker to stale RGBs.
+        data = (json.loads((source / metadata).read_text()) if (source / metadata).is_file()
+                else dict(backend='cpu_original_v1'))
+        dump_json(destination / metadata, data)
+        copied += 1
+    print(f'Reused compatible target renders: {copied} (no reference selections reused).', flush=True)
+
+
 def select_references(method, masks, counts, candidate_ids, count, top_per_target):
     if method == 'original':
         selected, diagnostic = choose_original_references(counts, count, top_per_target)
@@ -165,9 +224,10 @@ def write_comparison(root, manifests, method_roots):
             metric = chunk['retrieval']
             choices[method] = dict(reference_ids=chunk['reference_ids'], actual_reference_count=len(chunk['reference_ids']),
                                    mean_coverage=metric['mean_coverage'], min_coverage=metric['min_coverage'],
+                                   retrieval_target_ids=metric.get('retrieval_target_ids', chunk['target_ids']),
                                    per_target_coverage=metric['selected_coverage_fraction_per_target'])
             sheet = str((method_roots[method] / 'reference_sheets' / f'chunk_{i:03d}.jpg').relative_to(root))
-            rows.append(f'<tr><td>{i}</td><td>{escape(method)}</td><td>{escape(str(chunk["reference_ids"]))}</td>'
+            rows.append(f'<tr><td>{i}</td><td>{escape(method)}</td><td>{len(metric.get("retrieval_target_ids", chunk["target_ids"]))}/{len(chunk["target_ids"])}</td><td>{escape(str(chunk["reference_ids"]))}</td>'
                         f'<td>{metric["mean_coverage"]:.3%}</td><td>{metric["min_coverage"]:.3%}</td>'
                         f'<td><a href="{escape(sheet, quote=True)}"><img width="400" src="{escape(sheet, quote=True)}"></a></td></tr>')
         preferred = max(choices, key=lambda m: (choices[m]['min_coverage'], choices[m]['mean_coverage']))
@@ -185,8 +245,8 @@ def write_comparison(root, manifests, method_roots):
         '<style>body{font:15px system-ui;margin:24px;background:#f5f7fa;color:#18232d}'
         'table{border-collapse:collapse}td,th{border:1px solid #ccd4dd;padding:10px;vertical-align:top}img{max-width:100%}</style>'
         '<h1>参考帧选择对比</h1><p>original：原项目的全点云投影贡献计数；improved：近似遮挡后的覆盖增益。'
-        '两者用相同采样可见性指标评估。覆盖率是几何代理指标，不能直接证明最终生成质量更好。</p>'
-        '<table><tr><th>Chunk</th><th>方法</th><th>参考 ID</th><th>平均覆盖</th><th>最差目标覆盖</th><th>参考图</th></tr>'
+        '两者在各段相同的检索目标范围内评估。覆盖率仅针对参与检索的目标，不代表被排除的前进帧或最终生成质量。</p>'
+        '<table><tr><th>Chunk</th><th>方法</th><th>检索目标/全部目标</th><th>参考 ID</th><th>平均覆盖</th><th>最差目标覆盖</th><th>参考图</th></tr>'
         + ''.join(rows) + '</table></html>')
 
 
@@ -228,6 +288,8 @@ def main():
     parser.add_argument('--chunk_size', type=int, default=4, help='Legacy files only; recorded chunk boundaries take precedence')
     parser.add_argument('--num_reference', type=int, default=6, help='Improved: exact count; original: upper limit, matching upstream')
     parser.add_argument('--reference_method', choices=['original', 'improved', 'compare'], default='improved')
+    parser.add_argument('--reference_target_scope', choices=['all', 'panorama'], default='panorama', help='Default: select references using only panorama views of advance_panorama chunks; legacy chunks use all views')
+    parser.add_argument('--reuse_renders_from', type=Path, help='Previous preparation root with compatible renders/; reuse target RGB/masks while reselecting references')
     pool_group = parser.add_mutually_exclusive_group()
     pool_group.add_argument('--reference_ids', nargs='+', type=int, help='Candidate reference IDs (zero based, from references.json)')
     pool_group.add_argument('--reference_pool', type=Path, help='JSON/TXT ID list, or a directory of reconstructed reference RGBs')
@@ -259,6 +321,7 @@ def main():
         parser.error('Targets must be nonempty and share one output size')
     try:
         target_groups = target_chunk_groups(document, args.chunk_size)
+        retrieval_groups = reference_target_groups(document, target_groups, args.reference_target_scope)
     except (ValueError, KeyError, TypeError) as error:
         parser.error(str(error))
     selected_chunks = args.chunk_ids if args.chunk_ids is not None else list(range(len(target_groups)))
@@ -292,6 +355,8 @@ def main():
                     reference_pool=pool, methods=methods)
     if args.context_chunks:
         settings['context_chunks'] = True
+    if retrieval_groups != target_groups:
+        settings['reference_target_scope'] = 'panorama'
     root = args.output_dir
     root.mkdir(parents=True, exist_ok=True)
     config_path = root / 'preparation_config.json'
@@ -362,22 +427,26 @@ def main():
             if not needed:
                 continue
             started = time.perf_counter()
-            print(f'Retrieving chunk {chunk_id + 1}/{len(target_groups)}: {len(target_ids)} targets ({args.retrieval_device})', flush=True)
+            retrieval_ids = retrieval_groups[chunk_id]
+            print(f'Retrieving chunk {chunk_id + 1}/{len(target_groups)}: {len(retrieval_ids)}/{len(target_ids)} targets ({args.retrieval_device}, scope={args.reference_target_scope})', flush=True)
             if retriever is None:
                 masks = np.stack([visible_source_coverage(sample, sources, cameras[i], len(reference_paths),
-                                  args.retrieval_width, args.depth_tolerance, candidate_ids=candidate_ids) for i in target_ids])
+                                  args.retrieval_width, args.depth_tolerance, candidate_ids=candidate_ids) for i in retrieval_ids])
             else:
-                masks = CudaCoverage(retriever.chunk_coverage([cameras[i] for i in target_ids],
+                masks = CudaCoverage(retriever.chunk_coverage([cameras[i] for i in retrieval_ids],
                                      args.retrieval_width, args.depth_tolerance))
             counts = None
             if 'original' in needed:
                 counts = np.stack([original_source_counts(full['points'], full['colors'], full['source_indices'],
                                    cameras[i], len(reference_paths))[candidate_ids] if retriever is None
-                                   else retriever.original_counts(cameras[i]) for i in target_ids])
+                                   else retriever.original_counts(cameras[i]) for i in retrieval_ids])
             for method in needed:
                 ids, diagnostic = select_references(method, masks, counts, candidate_ids,
                                                     args.num_reference, args.original_top_per_target)
                 diagnostic['retrieval_backend'] = args.retrieval_device
+                diagnostic['retrieval_target_ids'] = retrieval_ids
+                diagnostic['excluded_target_ids'] = [i for i in target_ids if i not in retrieval_ids]
+                diagnostic['reference_target_scope'] = 'all' if retrieval_ids == target_ids else 'panorama'
                 diagnostic['elapsed_chunk_seconds'] = time.perf_counter() - started
                 chunk = chunk_description(chunk_id, target_ids, ids, resolved_paths, method, diagnostic)
                 manifests[method]['chunks'].append(chunk)
@@ -403,6 +472,12 @@ def main():
     if args.plan_only:
         print(f'Reference plans ready: {root / "selection_comparison.html"}; no condition videos rendered.', flush=True)
         return
+    if args.reuse_renders_from is not None:
+        try:
+            reuse_target_renders(args.reuse_renders_from, root, settings, size, args.render_device,
+                                [i for c in selected_chunks for i in target_groups[c]])
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            parser.error(str(error))
     todo = {method: [manifests[method]['chunks'][i] for i in selected_chunks
                      if not chunk_complete(output, manifests[method]['chunks'][i], size, root, args.render_device)]
             for method, output in method_roots.items()}
